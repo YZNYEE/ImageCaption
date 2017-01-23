@@ -52,6 +52,7 @@ function layer:updataGradInput(inputs, gradOutput)
 	for i=1,self.size[1] do
 		self.lookup_tables[i]:backward(inputs[i],gradOutput)
 	end
+	return torch.tensor()
 
 end
 
