@@ -10,9 +10,9 @@ function layer:_init(opt)
 	self.vocab_size = utils.getopt(opt, 'vocab_size', nil)
 	self.encoding_size = utils.getopt(opt, 'encoding_size', 512)
 	self.length = utils.getopt(opt, 'length', 16)
+	self.batch_size = utils.getopt(opt, 'batch_size', nil)
 	assert(self.vocab_size ~= nil,'vocab_size error')
 	self.lookup_table = nn.LookupTable(self.vocab_size+1, self.encoding_size)
-	createClones(self.length)
 
 end
 
@@ -26,33 +26,48 @@ function layer:createClones(length)
 
 end
 
+
+-- inputs is DxN LongTensor. D is batch_size. N is the length
 function layer:updataOutput(inputs)
 
 	self.size = inputs:size()
-	self.inputs = {}
 	self.output = nil
 
-	for i=1,size[1] do
-		self.inputs[i]=self.lookup_tables[i]:forward(inputs[i])
-	end
+	self.inputs = self.lookup_table:forward(inputs)
+	self.output = torch.FloatTensor(self.batch_size, self.encoding_size):zero()
+	for i=1,self.batch_size do self.output[i] = self.inputs:mean(1) end
 
-	self.output = torch.FloatTensor(self.encoding_size):zero()
-	for i=1,size[1] do
-		self.output:add(self.inputs[i])
-	end
-
-	self.output:div(self.size[1])
 	return self.output
 
 end
 
+
+
 function layer:updataGradInput(inputs, gradOutput)
 
-	gradOutput:div(self.size[1])
-	for i=1,self.size[1] do
-		self.lookup_tables[i]:backward(inputs[i],gradOutput)
-	end
+	local gout = gradOutput:div(self.size[2])
+	local dlookup_table = torch.FloatTensor(self.batch_size, self.length, self.encoding_size):zero()
+	for j = 1,self.batch_size do dlookup_table[j] = torch.expand(gout[j], self.length, 1) end
+	self.lookup_table:backward(self.inputs, dlookup_table)
+
 	return torch.tensor()
 
 end
+
+function layer:getModuleList()
+
+	return {self.lookup_table}
+
+end
+
+function layer:parameters()
+
+	local p1,g1 = self.lookup_table:parameters()
+	local params={}
+	local grad_params={}
+	for k,v in pairs(p1) do table.insert(params, v) end
+	for k,v in pairs(g1) do table.insert(params, v) end
+
+end
+
 
