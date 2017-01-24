@@ -64,4 +64,4 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
 
 end
 
-return GRU
+return MLGRU

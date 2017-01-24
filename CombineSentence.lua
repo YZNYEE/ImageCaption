@@ -9,7 +9,7 @@ function layer:_init(opt)
 
 	self.vocab_size = utils.getopt(opt, 'vocab_size', nil)
 	self.encoding_size = utils.getopt(opt, 'encoding_size', 512)
-	self.length = utils.getopt(opt, 'length', 16)
+	self.seq_length = utils.getopt(opt, 'seq_length', 16)
 	self.batch_size = utils.getopt(opt, 'batch_size', nil)
 	assert(self.vocab_size ~= nil,'vocab_size error')
 	self.lookup_table = nn.LookupTable(self.vocab_size+1, self.encoding_size)
