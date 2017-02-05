@@ -70,12 +70,12 @@ function local_attention(inputs)
 
 	self.beattention = torch.FloatTensor(self.batch_size, size_img[2]):zero()
 
-	for j=1,self.batch_size do
-		for i=1,size_img[1] do
-			local belta = self.DotProduct:forward({img:sub(j,j,i,i), sen(j,j)})
-			self.beattention:sub(j,j,i,i):copy(belta)
-		end
+
+	for i=1,size_img[1] do
+		local belta = self.DotProduct:forward({img:sub(1,self.batch_size,i,i), sen})
+		self.beattention:sub(1,self.batch_size,i,i):copy(belta)
 	end
+
 
 	self.attention = torch.FloatTensor(self.batch_size, size_img[2]):zero()
 	self.attention = self.Tanh:forward(self.beattention)
@@ -83,7 +83,7 @@ function local_attention(inputs)
 	self.ind = torch.Tensor(self.batch_size, size_img[2])
 
 	for i=1, self.batch_size do
-		local y,ind = torch.sort(self.attention)
+		local y,ind = torch.sort(self.attention:sub(i,i))
 		self.ind[i] = ind
 	end
 
@@ -154,7 +154,7 @@ function local_grad(inputs, gradoutput)
 
 	local grad = gradoutput:div(len)
 
-	local grad_att = torch.FloatTensor(size_img):zero()
+	local grad_att = torch.FloatTensor(size_img[1], size_img[3]):zero()
 	local grad_sen = torch.FloatTensor(size_sen):zero()
 
 	for j=1,self.batch_size do
@@ -171,7 +171,7 @@ function local_grad(inputs, gradoutput)
 
 	for j=1,self.batch_size do
 
-		local gimg_1, gsen = self.eltwise:backward({img[j], torch.expand(self.attention[j], 1, size_sen[1])}, grad_att[j])
+		local gimg_1, gsen = self.eltwise:backward({img[j], torch.expand(self.attention[j], 1, size_sen[2])}, grad_att[j])
 		gsen = torch.sum(gsen, 2)
 		gsen = self.Tanh:backward(self.beattention[j], gsen)
 
@@ -187,7 +187,7 @@ function local_grad(inputs, gradoutput)
 				gradsen[j]:add(gs)
 			end
 		end
-	gradimg[j]:add(gimg_1)
+		gradimg[j]:add(gimg_1)
 	end
 
 	return {gradimg, gradsen}
