@@ -5,14 +5,14 @@ require'torch'
 local layer,parent = torch.class('nn.ConstructAttention','nn.module')
 local utils = require'misc.utils'
 
-function layer:_init(opt)
+function layer:_init(opt, subject)
 
 	self.encoding_size = utils.getopt(opt, 'encoding_size', 512)
 	self.local_img_num = utils.getopt(opt, 'local_img_num', 196)
 	-- get_top_num is the num of the local_img gotten, and 0 represent 'all'
 	self.get_top_num = utils.getopt(opt, 'get_top_num', 3)
 	-- subject: 'local', 'overall'
-	self.subject = utils.getopt(opt, 'subject', nil)
+	self.subject = subject
 	self.batch_size = utils.getopt(opt, 'batch_size', nil)
 	self.DotProduct = nn.DotProduct()
 	self.Tanh = nn.Tanh()
