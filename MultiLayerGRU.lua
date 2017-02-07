@@ -26,12 +26,12 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
   end
 
 
-  local x, input_size_L, img
+  local x, input_size_L
   local outputs = {}
 
   for L = 1,n do
-	prev_h = inputs[2*L]
-	img = inputs[2*L + 1]
+	local prev_h = inputs[2*L]
+	local img = inputs[2*L + 1]
     if L == 1 then x = inputs[1] else x = outputs[L-1] end
 	if L > 1 then if dropout > 0 then x = nn.Dropout(dropout)(x):annotate{name='drop_' .. L} end end
     if L == 1 then input_size_L = input_size else input_size_L = rnn_size end
@@ -57,8 +57,9 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
   local top_h = outputs[#outputs]
   if dropout > 0 then top_h = nn.Dropout(dropout)(top_h):annotate{name='drop_final'} end
   local proj = nn.Linear(rnn_size, output_size)(top_h):annotate{name='decoder'}
+  local logsoft = nn.LogSoftMax()(proj)
 
-  table.insert(outputs, proj)
+  table.insert(outputs, logsoft)
 
   return nn.gModule(inputs, outputs)
 

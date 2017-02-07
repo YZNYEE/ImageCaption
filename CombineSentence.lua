@@ -1,18 +1,22 @@
 require'nn'
 require'nngraph'
 require'torch'
-
-local layer, parent = torch.class('nn.SenInfo','nn.module')
 local utils = require'misc.utils'
 
-function layer:_init(opt)
+
+local layer, parent = torch.class('nn.SenInfo','nn.Module')
+function layer:__init(opt)
+
+	parent.__init(self)
+	-- print(111111111111)
 
 	self.vocab_size = utils.getopt(opt, 'vocab_size', nil)
 	self.encoding_size = utils.getopt(opt, 'encoding_size', 512)
 	self.seq_length = utils.getopt(opt, 'seq_length', 16)
 	self.batch_size = utils.getopt(opt, 'batch_size', nil)
 	assert(self.vocab_size ~= nil,'vocab_size error')
-	self.lookup_table = nn.LookupTable(self.vocab_size+1, self.encoding_size)
+	self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.encoding_size)
+	-- print(self.lookup_table)
 
 end
 
@@ -28,14 +32,17 @@ end
 
 
 -- inputs is DxN LongTensor. D is batch_size. N is the length
-function layer:updataOutput(inputs)
+function layer:updateOutput(inputs)
 
 	self.size = inputs:size()
 	self.output = nil
 
 	self.inputs = self.lookup_table:forward(inputs)
-	self.output = torch.FloatTensor(self.batch_size, self.encoding_size):zero()
-	for i=1,self.batch_size do self.output[i] = self.inputs:mean(1) end
+	self.output = torch.FloatTensor(self.batch_size, self.encoding_size):zero():type(self._type)
+
+	for i=1,self.batch_size do
+		self.output[i] = self.inputs[i]:mean(1)
+	end
 
 	return self.output
 
@@ -43,14 +50,14 @@ end
 
 
 
-function layer:updataGradInput(inputs, gradOutput)
+function layer:updateGradInput(inputs, gradOutput)
 
 	local gout = gradOutput:div(self.size[2])
-	local dlookup_table = torch.FloatTensor(self.batch_size, self.length, self.encoding_size):zero()
-	for j = 1,self.batch_size do dlookup_table[j] = torch.expand(gout[j], self.length, 1) end
+	local dlookup_table = torch.FloatTensor(self.batch_size, self.seq_length, self.encoding_size):zero():type(self._type)
+	for j = 1,self.batch_size do dlookup_table[j] = torch.expand(gout[j]:resize(1, self.encoding_size), self.seq_length, self.encoding_size) end
 	self.lookup_table:backward(self.inputs, dlookup_table)
 
-	return torch.tensor()
+	return torch.Tensor()
 
 end
 

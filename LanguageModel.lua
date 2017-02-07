@@ -168,9 +168,9 @@ function layer:sample(imgs, opt)
 	subseq[t] = it
 	local CombineS = self.combineSen:forward(subseq:sub(1,t):resize(batch_size, t))
 	local ImgFeature = {}
-	ImgFeature[1] = self.constructAtt_l1:forward(img[1], CombineS)
-	ImgFeature[2] = self.constructAtt_l2:forward(img[2], CombineS)
-	ImgFeature[3] = self.constructAtt_o:forward(img[3], Combines)
+	ImgFeature[1] = self.constructAtt_l1:forward({img[1], CombineS})
+	ImgFeature[2] = self.constructAtt_l2:forward({img[2], CombineS})
+	ImgFeature[3] = self.constructAtt_o:forward({img[3], CombineS})
 	assert( #state == 3,'num_layers is not accordance with expectation')
 
     inputs = {xt}
