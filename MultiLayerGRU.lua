@@ -18,10 +18,10 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
 
   assert(#inputs == 2*n+1,'error')
 
-  function new_input_sum(insize, xv, hv, gv)
+  function new_input_sum(insize,gsize, xv, hv, gv)
     local i2h = nn.Linear(insize, rnn_size)(xv)
     local h2h = nn.Linear(rnn_size, rnn_size)(hv)
-	local g2h = nn.Linear(insize, rnn_size)(gv)
+	local g2h = nn.Linear(gsize, rnn_size)(gv)
     return nn.CAddTable()({i2h, h2h, g2h})
   end
 
@@ -37,14 +37,14 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
     if L == 1 then input_size_L = input_size else input_size_L = rnn_size end
     -- GRU tick
     -- forward the update and reset gates
-    local update_gate = nn.Sigmoid()(new_input_sum(input_size_L, x, prev_h, img))
-    local reset_gate = nn.Sigmoid()(new_input_sum(input_size_L, x, prev_h, img))
+    local update_gate = nn.Sigmoid()(new_input_sum(input_size_L, input_size, x, prev_h, img))
+    local reset_gate = nn.Sigmoid()(new_input_sum(input_size_L, input_size, x, prev_h, img))
     -- compute candidate hidden state
     local gated_hidden = nn.CMulTable()({reset_gate, prev_h})
     local p2 = nn.Linear(rnn_size, rnn_size)(gated_hidden)
     local p1 = nn.Linear(input_size_L, rnn_size)(x)
 	-- compute information given by img
-	local p3 = nn.Linear(input_size_L, rnn_size)(img)
+	local p3 = nn.Linear(input_size, rnn_size)(img)
 
     local hidden_candidate = nn.Tanh()(nn.CAddTable()({p1,p2,p3}))
     -- compute new interpolated hidden state, based on the update gate

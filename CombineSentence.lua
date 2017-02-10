@@ -16,6 +16,7 @@ function layer:__init(opt)
 	self.batch_size = utils.getopt(opt, 'batch_size', nil)
 	assert(self.vocab_size ~= nil,'vocab_size error')
 	self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.encoding_size)
+	-- self:initialWeight()
 	-- print(self.lookup_table)
 
 end
@@ -30,6 +31,12 @@ function layer:createClones(length)
 
 end
 
+function layer:initialWeight()
+
+	self.weight = self.lookup_table.weight
+	self.gradWeight = self.lookup_table.gradWeight
+
+end
 
 -- inputs is DxN LongTensor. D is batch_size. N is the length
 function layer:updateOutput(inputs)
@@ -55,7 +62,7 @@ function layer:updateGradInput(inputs, gradOutput)
 	local gout = gradOutput:div(self.size[2])
 	local dlookup_table = torch.FloatTensor(self.batch_size, self.seq_length, self.encoding_size):zero():type(self._type)
 	for j = 1,self.batch_size do dlookup_table[j] = torch.expand(gout[j]:resize(1, self.encoding_size), self.seq_length, self.encoding_size) end
-	self.lookup_table:backward(self.inputs, dlookup_table)
+	self.lookup_table:backward(inputs, dlookup_table)
 
 	return torch.Tensor()
 
@@ -75,6 +82,21 @@ function layer:parameters()
 	for k,v in pairs(p1) do table.insert(params, v) end
 	for k,v in pairs(g1) do table.insert(params, v) end
 
+	return params, grad_params
+
 end
 
+function layer:clone(...)
+
+    local f = torch.MemoryFile("rw"):binary()
+    f:writeObject(self)
+    f:seek(1)
+    local clone = f:readObject()
+    f:close()
+
+    clone.lookup_table = self.lookup_table:clone(...)
+
+    return clone
+
+end
 

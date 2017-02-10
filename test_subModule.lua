@@ -46,6 +46,9 @@ local function forwardApiTestFactory(dtype)
 		local conatt = nn.ConstructAttention(opt, 'local')
 		conatt:type(dtype)
 
+		local conatt_overall = nn.ConstructAttention(opt, 'overall')
+		conatt_overall:type(dtype)
+
 		-- test mlgru's interface
 
 		local xt = torch.randn(opt.batch_size, 10):type(dtype)
@@ -78,6 +81,7 @@ local function forwardApiTestFactory(dtype)
 		local sen = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
 
 		local output = conatt:forward({img_local, sen})
+
 		local w = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
 
 		local gradInput = conatt:backward({img_local, sen}, w)
@@ -85,6 +89,24 @@ local function forwardApiTestFactory(dtype)
 		tester:assertTensorSizeEq(output, {opt.batch_size, opt.encoding_size})
 		tester:assertTensorSizeEq(gradInput[1], {opt.batch_size, opt.local_img_num, opt.encoding_size})
 		tester:assertTensorSizeEq(gradInput[2], {opt.batch_size, opt.encoding_size})
+
+			-- test interface of ConstructAttention about 'overall'
+
+		local img_local = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+		local sen = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+
+		local output = conatt_overall:forward({img_local, sen})
+
+		local w = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+
+		local gradInput = conatt_overall:backward({img_local, sen}, w)
+
+		tester:assertTensorSizeEq(output, {opt.batch_size, opt.encoding_size})
+		tester:assertTensorSizeEq(gradInput[1], {opt.batch_size, opt.encoding_size})
+		tester:assertTensorSizeEq(gradInput[2], {opt.batch_size, opt.encoding_size})
+
+
+
 	end
 	return f
 end
@@ -219,11 +241,67 @@ local function gradCheck_ConstructAttention()
 
 end
 
+local function gradCheck_ConstructAttention_overall()
+
+	local dtype = 'torch.DoubleTensor'
+	local opt = {}
+
+	opt.encoding_size = 10
+	opt.local_img_num = 6
+	opt.get_top_num = 3
+	opt.subject = 'overall'
+	opt.batch_size = 5
+
+	local conatt = nn.ConstructAttention(opt, opt.subject)
+	conatt:type(dtype)
+
+	local img_local = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+	local sen = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+
+	local output = conatt:forward({img_local, sen})
+	local w = torch.randn(opt.batch_size, opt.encoding_size)
+	output = output:type(w:type())
+
+	local loss = torch.sum(torch.cmul(output, w))
+	local gradOutput = w
+	local grad = conatt:backward({img_local, sen}, gradOutput)
+	local gradimg = grad[1]
+	local gradsen = grad[2]
+
+	local function f1(x)
+		local output = conatt:forward({x, sen})
+		output = output:type(w:type())
+		local loss = torch.sum(torch.cmul(output, w))
+		return loss
+	end
+
+	local function f2(x)
+		local output = conatt:forward({img_local, x})
+		output = output:type(w:type())
+		local loss = torch.sum(torch.cmul(output, w))
+		return loss
+	end
+
+
+	local gradimg_num = gradcheck.numeric_gradient(f1, img_local, 1, 1e-6)
+
+	tester:assertTensorEq(gradimg, gradimg_num, 1e-4)
+	tester:assertlt(gradcheck.relative_error(gradimg, gradimg_num, 1e-8), 1e-4)
+
+
+	local gradsen_num = gradcheck.numeric_gradient(f2, sen, 1, 1e-6)
+
+	tester:assertTensorEq(gradsen, gradsen_num, 1e-4)
+	tester:assertlt(gradcheck.relative_error(gradsen, gradsen_num, 1e-8), 1e-4)
+
+end
+
 tests.doubleApiForwardTest = forwardApiTestFactory('torch.DoubleTensor')
 tests.floatApiForwardTest = forwardApiTestFactory('torch.FloatTensor')
 tests.cudaApiForwardTest = forwardApiTestFactory('torch.CudaTensor')
 tests.gradCheck_MLGRU = gradCheck_MLGRU
 tests.gradCheck_ConstructAttention = gradCheck_ConstructAttention
+tests.gradCheck_ConstructAttention_overall = gradCheck_ConstructAttention_overall
 
 tester:add(tests)
 tester:run()

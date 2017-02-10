@@ -14,8 +14,10 @@ function layer:__init(opt)
   parent.__init(self)
 
   -- options for core network
+  self.batch_size = utils.getopt(opt, 'batch_size')
   self.vocab_size = utils.getopt(opt, 'vocab_size') -- required
   self.input_encoding_size = utils.getopt(opt, 'encoding_size')
+  self.encoding_size = utils.getopt(opt, 'encoding_size')
   self.rnn_size = utils.getopt(opt, 'rnn_size')
   self.num_layers = utils.getopt(opt, 'num_layers', 3)
   self.local_img_num = utils.getopt(opt, 'local_img_num', 196)
@@ -28,8 +30,8 @@ function layer:__init(opt)
   self.constructAtt_l1 = nn.ConstructAttention(opt, 'local')
   self.constructAtt_l2 = nn.ConstructAttention(opt, 'local')
   self.constructAtt_o = nn.ConstructAttention(opt, 'overall')
-  self.combineSen = nn.ConstructSentence(opt)
-  self.core = MLGRU.MLGRU(self.input_encoding_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
+  self.combineSen = nn.SenInfo(opt)
+  self.core = MLGRU.mlgru(self.input_encoding_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
   self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.input_encoding_size)
   self:_createInitState(1) -- will be lazily resized later during forward passes
 
@@ -57,11 +59,11 @@ function layer:createClones()
   print('constructing clones inside the LanguageModel')
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
-  self.CombineSens = {self.CombineSen}
+  self.combineSens = {self.combineSen}
   for t=2,self.seq_length+1 do
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
-	self.combineSens[t] = self.combineSens:clone('weight','gradWeight')
+	self.combineSens[t] = self.combineSen:clone('weight','gradWeight')
   end
 end
 
@@ -74,7 +76,7 @@ function layer:parameters()
   -- we only have two internal modules, return their params
   local p1,g1 = self.core:parameters()
   local p2,g2 = self.lookup_table:parameters()
-  local p3.g3 = self.combineSen:parameters()
+  local p3,g3 = self.combineSen:parameters()
 
   local params = {}
   for k,v in pairs(p1) do table.insert(params, v) end
@@ -166,11 +168,21 @@ function layer:sample(imgs, opt)
 	end
 
 	subseq[t] = it
-	local CombineS = self.combineSen:forward(subseq:sub(1,t):resize(batch_size, t))
-	local ImgFeature = {}
-	ImgFeature[1] = self.constructAtt_l1:forward({img[1], CombineS})
-	ImgFeature[2] = self.constructAtt_l2:forward({img[2], CombineS})
-	ImgFeature[3] = self.constructAtt_o:forward({img[3], CombineS})
+
+	local imgFeature = {}
+
+	if t > 1 then
+		local combineS = self.combineSens[t]:forward(subseq:sub(1,t-1):t())
+		imgFeature[1] = self.constructAtt_l1:forward({l_1, combineS})
+		imgFeature[2] = self.constructAtt_l2:forward({l_2, combineS})
+		imgFeature[3] = self.constructAtt_o:forward({overall, combineS})
+		assert( #state == 3,'num_layers is not accordance with expectation')
+	else
+		ImgFeature[1] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
+		ImgFeature[2] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
+		ImgFeature[3] = overall
+	end
+
 	assert( #state == 3,'num_layers is not accordance with expectation')
 
     inputs = {xt}
@@ -294,17 +306,27 @@ function layer:sample_beam(imgs, opt)
       if new_state then state = new_state end -- swap rnn state, if we reassinged beams
 
 	  subseq[t] = it
-	  local CombineS = self.combineSen:forward(subseq:sub(1,t):resize(beam_size, t))
-	  local ImgFeature = {}
-	  ImgFeature[1] = self.constructAtt_l1:forward(img[1], CombineS)
-	  ImgFeature[2] = self.constructAtt_l2:forward(img[2], CombineS)
-	  ImgFeature[3] = self.constructAtt_o:forward(img[3], Combines)
+
+	  local imgFeature = {}
+
+	  if t > 1 then
+		local combineS = self.combineSens[t]:forward(subseq:sub(1,t-1):t())
+		imgFeature[1] = self.constructAtt_l1:forward({l_1, combineS})
+		imgFeature[2] = self.constructAtt_l2:forward({l_2, combineS})
+		imgFeature[3] = self.constructAtt_o:forward({overall, combineS})
+		assert( #state == 3,'num_layers is not accordance with expectation')
+	  else
+		imgFeature[1] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
+		imgFeature[2] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
+		imgFeature[3] = overall
+	  end
+
 	  assert( #state == 3,'num_layers is not accordance with expectation')
 
 	  inputs = {xt}
 	  for i=1,3 do
 		table.insert(inputs, state[i])
-		table.insert(inputs, ImgFeature[i])
+		table.insert(inputs, imgFeature[i])
 	  end
 
       local out = self.core:forward(inputs)
@@ -328,7 +350,7 @@ input is a tuple of:
 2. torch.LongTensor of size DxN, elements 1..M
    where M = opt.vocab_size and D = opt.seq_length
 
-returns a (D+2)xNx(M+1) Tensor giving (normalized) log probabilities for the
+returns a (D+1)xNx(M+1) Tensor giving (normalized) log probabilities for the
 next token at every iteration of the LSTM (+2 because +1 for first dummy
 img forward, and another +1 because of START/END tokens shift)
 --]]
@@ -341,7 +363,7 @@ function layer:updateOutput(input)
 
   assert(seq:size(1) == self.seq_length)
   local batch_size = seq:size(2)
-  self.output:resize(self.seq_length+2, batch_size, self.vocab_size+1)
+  self.output:resize(self.seq_length+1, batch_size, self.vocab_size+1)
 
   self:_createInitState(batch_size)
 
@@ -353,7 +375,7 @@ function layer:updateOutput(input)
   self.subseq = torch.LongTensor(self.seq_length+1, batch_size)
   self.subseq:sub(2,self.seq_length+1, 1,batch_size):copy(seq)
   self.subseq:sub(1,1):fill(self.vocab_size+1)
-  self.ImgFeature = {}
+  self.combineS = {}
 
   for t=1,self.seq_length+1 do
 
@@ -366,7 +388,7 @@ function layer:updateOutput(input)
       xt = self.lookup_tables[t]:forward(it) -- NxK sized input (token embedding vectors)
     else
       -- feed in the rest of the sequence...
-      local it = seq[t-2]:clone()
+      local it = seq[t-1]:clone()
       if torch.sum(it) == 0 then
         -- computational shortcut for efficiency. All sequences have already terminated and only
         -- contain null tokens from here on. We can skip the rest of the forward pass and save time
@@ -387,24 +409,33 @@ function layer:updateOutput(input)
       end
     end
 
-      local out = self.core:forward(inputs)
-      if not can_skip then
+	if not can_skip then
       -- construct the inputs
 
+	  local imgFeature = {}
 
-	  self.CombineS[t] = self.combineSen:forward(subseq:sub(1,t-1):resize(batch_size, t))
-	  self.ImgFeature[t] = {}
-	  self.ImgFeature[t][1] = self.constructAtt_l1:forward(l_1, CombineS)
-	  self.ImgFeature[t][2] = self.constructAtt_l2:forward(l_2, CombineS)
-	  self.ImgFeature[t][3] = self.constructAtt_o:forward(overall, Combines)
-  	  assert( #state == 3,'num_layers is not accordance with expectation')
+	  if t > 1 then
+		local comseq = self.subseq:sub(1,t-1):t():clone()
+		comseq[torch.eq(comseq, 0)] = 1
+		self.combineS[t] = self.combineSens[t]:forward(comseq)
+		--print({self.combineS[t]:size(1), self.combineS[t]:size(2)})
+		--print({l_1:size(1), l_1:size(2), l_1:size(3)})
+		imgFeature[1] = self.constructAtt_l1:forward({l_1, self.combineS[t]})
+		imgFeature[2] = self.constructAtt_l2:forward({l_2, self.combineS[t]})
+		imgFeature[3] = self.constructAtt_o:forward({overall, self.combineS[t]})
+		assert( #self.state[t-1] == 3,'num_layers is not accordance with expectation')
+	  else
+		imgFeature[1] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
+		imgFeature[2] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
+		imgFeature[3] = overall
+	  end
 
       self.inputs[t] = {xt}
 	  for i=1,3 do
-		  table.insert(self.inputs, self.state[t-1][i])
-		  table.insert(self.inputs, self.ImgFeature[t][i])
+		  table.insert(self.inputs[t], self.state[t-1][i])
+		  table.insert(self.inputs[t], imgFeature[i]:clone())
 	  end
-	  local out = self.clones[t]:forward(inputs[t])
+	  local out = self.clones[t]:forward(self.inputs[t])
       -- process the outputs
       self.output[t] = out[self.num_state+1] -- last element is the output vector
       self.state[t] = {} -- the rest is state
@@ -424,6 +455,7 @@ function layer:updateGradInput(input, gradOutput)
 
   -- go backwards and lets compute gradients
   local dstate = {[self.tmax] = self.init_state} -- this works when init_state is all zeros
+  local dimg_local1, dimg_local2, doverall
   for t=self.tmax,1,-1 do
     -- concat state gradients and output vector gradients at time step t
     local dout = {}
@@ -432,7 +464,7 @@ function layer:updateGradInput(input, gradOutput)
     local dinputs = self.clones[t]:backward(self.inputs[t], dout)
     -- split the gradient to xt and to state
     assert( #dinputs == 7)
-	local dxt = dinputs[1] -- first element is the input vector
+	local dxt = dinputs[4] -- first element is the input vector
     dstate[t-1] = {} -- copy over rest to state grad
 
 	local gl_1
@@ -441,28 +473,49 @@ function layer:updateGradInput(input, gradOutput)
 	for k=1,3 do
 		table.insert(dstate[t-1], dinputs[k*2])
 		local gimg = dinputs[k*2+1]
-		if k==1 then gl_1 = gimg
-		if k==2 then gl_2 = gimg
-		if k==3 then overall = gimg
+		if k==1 then gl_1 = gimg end
+		if k==2 then gl_2 = gimg end
+		if k==3 then overall = gimg end
 	end
 
     -- continue backprop of xt
 	local it = self.lookup_tables_inputs[t]
 	self.lookup_tables[t]:backward(it, dxt) -- backprop into lookup table
 
-	local dgl_1, dsen_1 = self.ConstructAtt_l1:backward({input[1], self.CombineS[t]}, gl_1)
-	local dgl_2, dsen_2 = self.ConstructAtt_l2:backward({input[2], self.CombineS[t]}, gl_2)
-	local doverall, dsen_3 = self.ConstructAtt_o:backward({input[3], self.CombineS[t]}, overall)
-	local dsen = dsen_1
-	dsen:add(dsen_2)
-	dsen:add(dsen_3)
+	-- print({self.tmax, t})
+	local dgl_1, dgl_2, dover, dsen
+	if t > 1 then
+		local g1 = self.constructAtt_l1:backward({input[1], self.combineS[t]}, gl_1)
+		dgl_1 = g1[1]:clone()
+		dsen = g1[2]:clone()
+		local g2 = self.constructAtt_l2:backward({input[2], self.combineS[t]}, gl_2)
+		dgl_2 = g2[1]:clone()
+		dsen:add(g2[2])
+		local g3 = self.constructAtt_o:backward({input[3], self.combineS[t]}, overall)
+		dover = g3[1]:clone()
+		dsen:add(g3[2])
+		local comseq = self.subseq:sub(1,t-1):t():clone()
+		comseq[torch.eq(comseq, 0)] = 1
+		self.combineSens[t]:backward(comseq, dsen)
+	end
 
-	self.CombineSen[t]:backward(self.subseq:sub(1,t-1), dsen)
+	if t == self.tmax then
+		dimg_local1 = dgl_1:clone()
+		dimg_local2 = dgl_2:clone()
+		doverall = dover:clone()
+	elseif t > 1 then
+		dimg_local1:add(dgl_1)
+		dimg_local2:add(dgl_2)
+		doverall:add(dover)
+	else
+		doverall:add(dinputs[3])
+	end
+
 
   end
 
   -- we have gradient on image, but for LongTensor gt sequence we only create an empty tensor - can't backprop
-  self.gradInput = {dgl_1, dgl_2, doverall, torch.Tensor()}
+  self.gradInput = {dimg_local1, dimg_local2, doverall, torch.Tensor()}
   return self.gradInput
 end
 
@@ -476,7 +529,7 @@ function crit:__init()
 end
 
 --[[
-input is a Tensor of size (D+2)xNx(M+1)
+input is a Tensor of size (D+1)xNx(M+1)
 seq is a LongTensor of size DxN. The way we infer the target
 in this criterion is as follows:
 - at first time step the output is ignored (loss = 0). It's the image tick
@@ -489,24 +542,24 @@ function crit:updateOutput(input, seq)
   self.gradInput:resizeAs(input):zero() -- reset to zeros
   local L,N,Mp1 = input:size(1), input:size(2), input:size(3)
   local D = seq:size(1)
-  assert(D == L-2, 'input Tensor should be 2 larger in time')
+  assert(D == L-1, 'input Tensor should be 1 larger in time')
 
   local loss = 0
   local n = 0
   for b=1,N do -- iterate over batches
     local first_time = true
-    for t=2,L do -- iterate over sequence time (ignore t=1, dummy forward for the image)
+    for t=1,L do -- iterate over sequence time (ignore t=1, dummy forward for the image)
 
       -- fetch the index of the next token in the sequence
       local target_index
-      if t-1 > D then -- we are out of bounds of the index sequence: pad with null tokens
+      if t > D then -- we are out of bounds of the index sequence: pad with null tokens
         target_index = 0
       else
-        target_index = seq[{t-1,b}] -- t-1 is correct, since at t=2 START token was fed in and we want to predict first word (and 2-1 = 1).
+        target_index = seq[{t,b}] -- t is correct, since at t=1 START::::token was fed in and we want to predict first word (and 2-1 = 1).
       end
       -- the first time we see null token as next index, actually want the model to predict the END token
-      if target_index == 0 and first_time then
-        target_index = Mp1
+	  if target_index == 0 and first_time then
+		target_index = Mp1
         first_time = false
       end
 
@@ -522,6 +575,7 @@ function crit:updateOutput(input, seq)
   end
   self.output = loss / n -- normalize by number of predictions that were made
   self.gradInput:div(n)
+  -- print(self.gradInput)
   return self.output
 end
 

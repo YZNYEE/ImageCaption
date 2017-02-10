@@ -18,6 +18,7 @@ function layer:__init(opt, subject)
 	self.DotProduct = nn.DotProduct()
 	self.Tanh = nn.Tanh()
 	self.eltwise = nn.CMulTable()
+	self.eltwise_out = nn.CMulTable()
 	assert(self.batch_size ~= nil, 'must assign batch_size')
 
 end
@@ -40,13 +41,12 @@ function layer:updateOutput(inputs)
 		assert(size_sen[2] == size_img[3], 'dimension is not accordance')
 		assert(size_sen[2] == self.encoding_size, 'encdding_size is not equal with sentence')
 
-		self.beattention = torch.FloatTensor(self.batch_size, size_img[2]):zero()
+		--self.beattention = torch.FloatTensor(self.batch_size, size_img[2]):zero()
 
-
-		for i=1,size_img[2] do
-			local belta = self.DotProduct:forward({img:sub(1,self.batch_size,i,i), sen})
-			self.beattention:sub(1,self.batch_size,i,i):copy(belta)
-		end
+		local expandsen = torch.expand(sen:resize(size_sen[1], 1,size_sen[2]), size_img[1], size_img[2], size_img[3])
+		sen:resize(size_sen[1], size_sen[2])
+		self.beattention = torch.sum(torch.cmul(img, expandsen), 3)
+		self.beattention:div(size_img[3])
 
 		if self.beattention ~= self.Tanh._type then
 			self.beattention = self.beattention:type(self.Tanh._type)
@@ -61,18 +61,17 @@ function layer:updateOutput(inputs)
 			self.ind:sub(i,i):copy(ind)
 		end
 
-		self.output = torch.FloatTensor(self.batch_size, size_sen[2]):zero()
+		self.output = torch.FloatTensor(self.batch_size, size_sen[2]):zero():type(self._type)
 
 		local len = self.get_top_num
 		if len == 0 then
-			len = size_sen[2]
+			len = size_img[2]
 		end
 
 		self.local_att_img = torch.FloatTensor(self.batch_size, size_img[2], size_img[3])
 
-		for i=1,self.batch_size do
-			self.local_att_img:sub(i,i):copy(self.eltwise:forward({img[i], torch.expand(self.attention[i]:resize(size_img[2],1), size_img[2], size_img[3])}))
-		end
+		-- self.attention:Dx196
+		self.local_att_img = torch.cmul(img, torch.expand(self.attention:resize(size_img[1], size_img[2], 1), size_img[1], size_img[2], size_img[3]))
 
 		for j=1,self.batch_size do
 			for i=1, len do
@@ -96,7 +95,7 @@ function layer:updateOutput(inputs)
 
 		self.beattention = self.eltwise:forward({img, sen})
 		self.attention = self.Tanh:forward(self.beattention)
-		self.output = self.eltwise:forward({img,attention})
+		self.output = self.eltwise_out:forward({img, self.attention})
 
 		return self.output
 
@@ -116,9 +115,13 @@ function layer:updateGradInput(inputs, GradOutput)
 
 	local function overall_grad(inputs, gradoutput)
 
-		local gimg, gsen = self.eltwise:backward({inputs[1], self.attention}, gradoutput)
+		local grad= self.eltwise_out:backward({inputs[1], self.attention}, gradoutput)
+		local gimg = grad[1]
+		local gsen = grad[2]
 		local gradatt = self.Tanh:backward(self.beattention, gsen)
-		local grad_img, grad_sen = self.eltwise:backward(inputs, gradatt)
+		grad = self.eltwise:backward(inputs, gradatt)
+		local grad_img = grad[1]
+		local grad_sen = grad[2]
 		grad_img:add(gimg)
 		return {grad_img, grad_sen}
 	end
@@ -132,15 +135,19 @@ function layer:updateGradInput(inputs, GradOutput)
 		local sen = inputs[2]
 		local size_img = img:size()
 		local size_sen = sen:size()
+
+		assert(size_sen[2] == size_img[3], 'dimension is not accordance')
+		assert(size_sen[2] == self.encoding_size, 'encdding_size is not equal with sentence')
+
 		local len = self.get_top_num
 		if len == 0 then
-			len = size_sen[1]
+			len = size_img[2]
 		end
 
 		local grad = gradoutput:div(len)
 
-		local grad_att = torch.FloatTensor(size_img):zero()
-		local grad_sen = torch.FloatTensor(size_sen):zero()
+		local grad_att = torch.FloatTensor(size_img):zero():type(self._type)
+		local grad_sen = torch.FloatTensor(size_sen):zero():type(self._type)
 
 		for j=1,self.batch_size do
 			for i=1,len do
@@ -152,32 +159,21 @@ function layer:updateGradInput(inputs, GradOutput)
 		local gradimg= torch.FloatTensor(size_img):zero():type(self._type)
 		local gradsen = torch.FloatTensor(self.batch_size, size_img[2]):zero():type(self._type)
 		-- gradimg:DX196X512
-		-- gradsen:DX512
+		-- gradsen:DX196
 
-		for j=1,self.batch_size do
+		gradimg = torch.cmul(grad_att, torch.expand(self.attention:resize(size_img[1], size_img[2], 1), size_img[1], size_img[2], size_img[3]))
+		gradsen = torch.sum(torch.cmul(grad_att, img), 3)
 
-			local grad= self.eltwise:backward({img[j], torch.expand(self.attention[j]:resize(size_img[2],1), size_img[2], size_img[3])}, grad_att[j])
-			local gimg = grad[1]
-			local gsen = grad[2]
-			gsen = torch.sum(gsen, 2)
-			-- print({self.beattention[j]:size(1), gsen:size(1)})
-			-- print({gradsen:sub(j,j), gsen})
-			gradsen:sub(j,j):copy(gsen:resize(1,6))
-			gradimg:sub(j,j):copy(gimg)
-
-		end
 		gradsen = self.Tanh:backward(self.beattention, gradsen)
+		gradsen:div(size_img[3])
 		local gradsentence = torch.FloatTensor(sen:size()):zero():type(self._type)
+		local expandgradsen = torch.expand(gradsen:resize(size_img[1], size_img[2], 1), size_img[1], size_img[2], size_img[3])
 
-		for j=1,size_img[2] do
+		local grad_img2 = torch.cmul(expandgradsen, torch.expand(sen:resize(size_img[1], 1, size_img[3]), size_img[1], size_img[2], size_img[3]))
+		sen:resize(size_img[1], size_img[3])
+		gradsentence = torch.sum(torch.cmul(expandgradsen, img), 2):resize(size_sen[1], size_sen[2])
 
-			local grad = self.DotProduct:backward({img:sub(1,self.batch_size,j,j):resize(self.batch_size, size_img[3]), sen}, gradsen:sub(1,self.batch_size,j,j):resize(self.batch_size))
-			local gimg = grad[1]
-			local gsen = grad[2]
-			gradimg:sub(1,self.batch_size,j,j):add(gimg)
-			gradsentence:add(gsen)
-
-		end
+		gradimg:add(grad_img2)
 
 		return {gradimg, gradsentence}
 	end
