@@ -128,9 +128,9 @@ local function gradCheck_MLGRU()
 
 	local output = core:forward({xt, h1, img1, h2, img2, h3, img3})
 	local w = torch.randn(output[4]:size())
-	local w1 = torch.randn(5, 10)
-	local w2 = torch.randn(5, 10)
-	local w3 = torch.randn(5, 10)
+	local w1 = torch.randn(5, 10):zero()
+	local w2 = torch.randn(5, 10):zero()
+	local w3 = torch.randn(5, 10):zero()
 
 
 	local loss = torch.sum(torch.cmul(output[4], w))
@@ -144,7 +144,7 @@ local function gradCheck_MLGRU()
 	local gradInput = core:backward(inputs, gradOutput)
 
 	local function f(x)
-		local output = core:forward({xt, h1, img1, h2, img2, x, img3})
+		local output = core:forward({xt, h1, x, h2, img2, h3, img3})
 		local loss = torch.sum(torch.cmul(output[4], w))
 		local loss1 = torch.sum(torch.cmul(output[1], w1))
 		local loss2 = torch.sum(torch.cmul(output[2], w2))
@@ -153,10 +153,10 @@ local function gradCheck_MLGRU()
 		return loss_sum
 	end
 
-	local gradInput_num = gradcheck.numeric_gradient(f, h3, 1, 1e-6)
+	local gradInput_num = gradcheck.numeric_gradient(f, img1, 1, 1e-6)
 
-	tester:assertTensorEq(gradInput[6], gradInput_num, 1e-4)
-	tester:assertlt(gradcheck.relative_error(gradInput[6], gradInput_num, 1e-8), 1e-4)
+	tester:assertTensorEq(gradInput[3], gradInput_num, 1e-4)
+	tester:assertlt(gradcheck.relative_error(gradInput[3], gradInput_num, 1e-8), 1e-4)
 
 end
 
@@ -204,15 +204,18 @@ local function gradCheck_ConstructAttention()
 	local sen = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
 
 	local output = conatt:forward({img_local, sen})
+	-- print(output)
 	local w = torch.randn(opt.batch_size, opt.encoding_size)
 	output = output:type(w:type())
-
+	-- print(output)
 	local loss = torch.sum(torch.cmul(output, w))
 	local gradOutput = w
+	print(w)
 	local grad = conatt:backward({img_local, sen}, gradOutput)
 	local gradimg = grad[1]
+	-- print(gradimg)
 	local gradsen = grad[2]
-
+	print(w)
 	local function f1(x)
 		local output = conatt:forward({x, sen})
 		output = output:type(w:type())
@@ -229,7 +232,7 @@ local function gradCheck_ConstructAttention()
 
 
 	local gradimg_num = gradcheck.numeric_gradient(f1, img_local, 1, 1e-6)
-
+	-- print(gradimg)
 	tester:assertTensorEq(gradimg, gradimg_num, 1e-4)
 	tester:assertlt(gradcheck.relative_error(gradimg, gradimg_num, 1e-8), 1e-4)
 
@@ -240,6 +243,118 @@ local function gradCheck_ConstructAttention()
 	tester:assertlt(gradcheck.relative_error(gradsen, gradsen_num, 1e-8), 1e-4)
 
 end
+
+local function gradCheck_ConstructAttention_Combine_MLGRU()
+
+	local dtype = 'torch.DoubleTensor'
+	local opt = {}
+
+	opt.encoding_size = 10
+	opt.local_img_num = 6
+	opt.get_top_num = 3
+	opt.subject = 'local'
+	opt.batch_size = 5
+
+	local conatt_1 = nn.ConstructAttention(opt, opt.subject)
+	local conatt_2 = nn.ConstructAttention(opt, opt.subject)
+	local conatt_3 = nn.ConstructAttention(opt, 'overall')
+	conatt_1:type(dtype)
+	conatt_2:type(dtype)
+	conatt_3:type(dtype)
+
+	local img_local_1 = torch.randn(opt.batch_size, opt.local_img_num, opt.encoding_size):type(dtype)
+	local img_local_2 = torch.randn(opt.batch_size, opt.local_img_num, opt.encoding_size):type(dtype)
+	local img_overall = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+	local sen = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+
+	local output_1 = conatt_1:forward({img_local_1, sen})
+	local output_2 = conatt_2:forward({img_local_2, sen})
+	local output_3 = conatt_3:forward({img_overall, sen})
+
+
+	local xt = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+	local h1 = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+	local h2 = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+	local h3 = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+
+	local core = MLGRU.mlgru(opt.encoding_size, 12, opt.encoding_size, 3, 0)
+	core:type(dtype)
+	local output = core:forward({xt, h1, output_1, h2, output_2, h3, output_3})
+	local w = torch.randn(opt.batch_size, 12):type(dtype)
+	output[4] = output[4]:type(w:type())
+	local dh1 = torch.randn(opt.batch_size, opt.encoding_size):zero():type(dtype)
+	local dh2 = torch.randn(opt.batch_size, opt.encoding_size):zero():type(dtype)
+	local dh3 = torch.randn(opt.batch_size, opt.encoding_size):zero():type(dtype)
+
+	local loss = torch.sum(torch.cmul(output[4], w))
+	local gradOutput = w
+
+	local grad = core:backward({xt, h1, output_1, h2, output_2, h3, output_3}, {dh1, dh2, dh3,gradOutput})
+	-- print(grad[3])
+	local grad_l1 = grad[3]
+
+	local grad_l2 = grad[5]
+	local grad_overall = grad[7]
+
+	local gl1 = conatt_1:backward({img_local_1, sen}, grad_l1)
+	local gl2 = conatt_2:backward({img_local_2, sen}, grad_l2)
+	local go = conatt_3:backward({img_overall, sen}, grad_overall)
+	-- print(gl1[1])
+	-- print(grad_l1)
+	local function f(x)
+		local out = core:forward({xt, h1, x, h2, output_2, h3, output_3})
+		local loss = torch.sum(torch.cmul(out[4], w))
+		return loss
+	end
+
+	local function f1(x)
+		local output = conatt_1:forward({x, sen})
+		local out = core:forward({xt, h1, output, h2, output_2, h3, output_3})
+		local loss = torch.sum(torch.cmul(out[4], w))
+		return loss
+	end
+
+	local function f2(x)
+		local output = conatt_2:forward({x, sen})
+		local out = core:forward({xt, h1, output_1, h2, output, h3, output_3})
+		local loss = torch.sum(torch.cmul(out[4], w))
+		return loss
+	end
+
+	local function f3(x)
+		local output = conatt_3:forward({x, sen})
+		local out = core:forward({xt, h1, output_1, h2, output_2, h3, output})
+		local loss = torch.sum(torch.cmul(out[4], w))
+		return loss
+	end
+
+
+	-- print(output_1)
+	local gradimg_num = gradcheck.numeric_gradient(f, output_1, 1, 1e-6)
+	-- print(grad_l1)
+	tester:assertTensorEq(grad_l1, gradimg_num, 1e-4)
+	tester:assertlt(gradcheck.relative_error(grad_l1, gradimg_num, 1e-8), 1e-4)
+
+	-- local gradimg_num = gradcheck.numeric_gradient(f1, img_local_1, 1, 1e-6)
+
+--	tester:assertTensorEq(gl1[1], gradimg_num, 1e-4)
+--	tester:assertlt(gradcheck.relative_error(gl1[1], gradimg_num, 1e-8), 1e-4)
+	--print(gl1[1])
+	--print(gradimg_num)
+
+--	local gradsen_num = gradcheck.numeric_gradient(f2, img_local_2, 1, 1e-6)
+
+--	tester:assertTensorEq(gl2[1], gradsen_num, 1e-4)
+--	tester:assertlt(gradcheck.relative_error(gl2[1], gradsen_num, 1e-8), 1e-4)
+
+--	local gradsen_num = gradcheck.numeric_gradient(f3, img_overall, 1, 1e-6)
+
+--	tester:assertTensorEq(go[1], gradsen_num, 1e-4)
+--	tester:assertlt(gradcheck.relative_error(go[1], gradsen_num, 1e-8), 1e-4)
+
+end
+
+
 
 local function gradCheck_ConstructAttention_overall()
 
@@ -259,6 +374,7 @@ local function gradCheck_ConstructAttention_overall()
 	local sen = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
 
 	local output = conatt:forward({img_local, sen})
+	-- print(output)
 	local w = torch.randn(opt.batch_size, opt.encoding_size)
 	output = output:type(w:type())
 
@@ -296,12 +412,15 @@ local function gradCheck_ConstructAttention_overall()
 
 end
 
+
+
 tests.doubleApiForwardTest = forwardApiTestFactory('torch.DoubleTensor')
 tests.floatApiForwardTest = forwardApiTestFactory('torch.FloatTensor')
 tests.cudaApiForwardTest = forwardApiTestFactory('torch.CudaTensor')
 tests.gradCheck_MLGRU = gradCheck_MLGRU
 tests.gradCheck_ConstructAttention = gradCheck_ConstructAttention
 tests.gradCheck_ConstructAttention_overall = gradCheck_ConstructAttention_overall
+-- tests.gradCheck_ConstructAttention_Combine_MLGRU = gradCheck_ConstructAttention_Combine_MLGRU
 
 tester:add(tests)
 tester:run()

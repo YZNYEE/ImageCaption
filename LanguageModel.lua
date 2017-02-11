@@ -59,7 +59,7 @@ function layer:createClones()
   print('constructing clones inside the LanguageModel')
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
-  self.combineSens = {self.combineSen}
+  self.combineSens = {}
   for t=2,self.seq_length+1 do
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
@@ -464,18 +464,14 @@ function layer:updateGradInput(input, gradOutput)
     local dinputs = self.clones[t]:backward(self.inputs[t], dout)
     -- split the gradient to xt and to state
     assert( #dinputs == 7)
-	local dxt = dinputs[4] -- first element is the input vector
+	local dxt = dinputs[1] -- first element is the input vector
     dstate[t-1] = {} -- copy over rest to state grad
 
-	local gl_1
-	local gl_2
-	local overall
+	local gl_1 = dinputs[3]
+	local gl_2 = dinputs[5]
+	local overall = dinputs[7]
 	for k=1,3 do
 		table.insert(dstate[t-1], dinputs[k*2])
-		local gimg = dinputs[k*2+1]
-		if k==1 then gl_1 = gimg end
-		if k==2 then gl_2 = gimg end
-		if k==3 then overall = gimg end
 	end
 
     -- continue backprop of xt
@@ -508,7 +504,7 @@ function layer:updateGradInput(input, gradOutput)
 		dimg_local2:add(dgl_2)
 		doverall:add(dover)
 	else
-		doverall:add(dinputs[3])
+		doverall:add(dinputs[7])
 	end
 
 

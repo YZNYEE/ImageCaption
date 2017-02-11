@@ -100,7 +100,7 @@ local function gradCheckLM()
   opt.rnn_size = 8
   opt.num_layers = 3
   opt.dropout = 0
-  opt.seq_length = 7
+  opt.seq_length = 1
   opt.batch_size = 6
 
   opt.local_img_num = 9
@@ -111,9 +111,9 @@ local function gradCheckLM()
   lm:type(dtype)
   crit:type(dtype)
 
-  local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(optS.vocab_size)
-  seq[{ {4, 7}, 1 }] = 0
-  seq[{ {5, 7}, 4 }] = 0
+  local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
+  -- seq[{ {4, 7}, 1 }] = 0
+  -- seq[{ {5, 7}, 4 }] = 0
   local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
   local img_l2 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
   local img_o = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)

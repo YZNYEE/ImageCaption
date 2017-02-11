@@ -31,7 +31,7 @@ function layer:updateOutput(inputs)
 	local function local_attention(inputs)
 
 		local img = inputs[1]
-		local sen = inputs[2]
+		local sen = inputs[2]:clone()
 		local size_img = img:size()
 		local size_sen = sen:size()
 
@@ -44,9 +44,9 @@ function layer:updateOutput(inputs)
 		--self.beattention = torch.FloatTensor(self.batch_size, size_img[2]):zero()
 
 		local expandsen = torch.expand(sen:resize(size_sen[1], 1,size_sen[2]), size_img[1], size_img[2], size_img[3])
-		sen:resize(size_sen[1], size_sen[2])
+
 		self.beattention = torch.sum(torch.cmul(img, expandsen), 3)
-		self.beattention:div(size_img[3])
+		-- self.beattention:div(size_img[3])
 
 		if self.beattention ~= self.Tanh._type then
 			self.beattention = self.beattention:type(self.Tanh._type)
@@ -73,12 +73,17 @@ function layer:updateOutput(inputs)
 		-- self.attention:Dx196
 		self.local_att_img = torch.cmul(img, torch.expand(self.attention:resize(size_img[1], size_img[2], 1), size_img[1], size_img[2], size_img[3]))
 
-		for j=1,self.batch_size do
-			for i=1, len do
-				self.output[j]:add(self.local_att_img:sub(j,j,self.ind[j][i], self.ind[j][i]))
+		if len ~= size_img[2] then
+			for j=1,self.batch_size do
+				for i=1, len do
+					self.output[j]:add(self.local_att_img:sub(j,j,self.ind[j][i], self.ind[j][i]))
+				end
 			end
+			self.output:div(len)
+		else
+			self.output = torch.sum(self.local_att_img, 2)
+			self.output:div(len)
 		end
-		self.output:div(len)
 		return self.output
 
 	end
@@ -131,8 +136,12 @@ function layer:updateGradInput(inputs, GradOutput)
 	-- gradoutput:DX512
 	local function local_grad(inputs, gradoutput)
 
+		local function abssum(a, b)
+			return torch.sum(torch.abs(a-b))
+		end
+
 		local img = inputs[1]
-		local sen = inputs[2]
+		local sen = inputs[2]:clone()
 		local size_img = img:size()
 		local size_sen = sen:size()
 
@@ -146,13 +155,20 @@ function layer:updateGradInput(inputs, GradOutput)
 
 		local grad = gradoutput:div(len)
 
+		-- print('1th evaluate')
+		-- print(abssum(grad, grad_1))
+
 		local grad_att = torch.FloatTensor(size_img):zero():type(self._type)
 		local grad_sen = torch.FloatTensor(size_sen):zero():type(self._type)
 
-		for j=1,self.batch_size do
-			for i=1,len do
-				grad_att:sub(j, j, self.ind[j][i], self.ind[j][i]):copy(grad[j])
+		if len ~= size_img[2] then
+			for j=1,self.batch_size do
+				for i=1,len do
+					grad_att:sub(j, j, self.ind[j][i], self.ind[j][i]):copy(grad[j])
+				end
 			end
+		else
+			grad_att = torch.expand(grad:resize(size_img[1], 1, size_img[3]), size_img[1], size_img[2], size_img[3])
 		end
 
 		-- grad_att:DX196X512
@@ -165,7 +181,7 @@ function layer:updateGradInput(inputs, GradOutput)
 		gradsen = torch.sum(torch.cmul(grad_att, img), 3)
 
 		gradsen = self.Tanh:backward(self.beattention, gradsen)
-		gradsen:div(size_img[3])
+		-- gradsen:div(size_img[3])
 		local gradsentence = torch.FloatTensor(sen:size()):zero():type(self._type)
 		local expandgradsen = torch.expand(gradsen:resize(size_img[1], size_img[2], 1), size_img[1], size_img[2], size_img[3])
 
