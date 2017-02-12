@@ -4,20 +4,18 @@ local utils = require 'misc.utils'
 local DataLoader = torch.class('DataLoader')
 
 function DataLoader:__init(opt)
-
+  
   -- load the json file which contains additional information about the dataset
   print('DataLoader loading json file: ', opt.json_file)
   self.info = utils.read_json(opt.json_file)
-  --ix_to_word是输入向量到词空间的一个映射
   self.ix_to_word = self.info.ix_to_word
-  --vocab_size标明词个数，也是维度的标记
   self.vocab_size = utils.count_keys(self.ix_to_word)
   print('vocab size is ' .. self.vocab_size)
-
+  
   -- open the hdf5 file
   print('DataLoader loading h5 file: ', opt.h5_file)
   self.h5_file = hdf5.open(opt.h5_file, 'r')
-
+  
   -- extract image size from dataset
   local images_size = self.h5_file:read('/images'):dataspaceSize()
   assert(#images_size == 4, '/images should be a 4D tensor')
@@ -25,25 +23,20 @@ function DataLoader:__init(opt)
   self.num_images = images_size[1]
   self.num_channels = images_size[2]
   self.max_image_size = images_size[3]
-  print(string.format('read %d images of size %dx%dx%d', self.num_images,
+  print(string.format('read %d images of size %dx%dx%d', self.num_images, 
             self.num_channels, self.max_image_size, self.max_image_size))
 
   -- load in the sequence data
   local seq_size = self.h5_file:read('/labels'):dataspaceSize()
-  --猜测seq_size[1]应为标记的数量
   self.seq_length = seq_size[2]
   print('max sequence length in data is ' .. self.seq_length)
   -- load the pointers in full to RAM (should be small enough)
-  -- 获得START与END两个特殊的向量
-  --这里我并不确定self.label_start_ix与label_end_ix的类型
-  --但可以确定的是label_start_ix与label_end_ix储存的是start与end的编号
   self.label_start_ix = self.h5_file:read('/label_start_ix'):all()
   self.label_end_ix = self.h5_file:read('/label_end_ix'):all()
-
+  
   -- separate out indexes for each of the provided splits
   self.split_ix = {}
   self.iterators = {}
-  --self.info.images是json格式数据信息
   for i,img in pairs(self.info.images) do
     local split = img.split
     if not self.split_ix[split] then
@@ -87,7 +80,6 @@ function DataLoader:getBatch(opt)
   local batch_size = utils.getopt(opt, 'batch_size', 5) -- how many images get returned at one time (to go through CNN)
   local seq_per_img = utils.getopt(opt, 'seq_per_img', 5) -- number of sequences to return per image
 
-  --split_ix里面存的是imgs的索引
   local split_ix = self.split_ix[split]
   assert(split_ix, 'split ' .. split .. ' not found.')
 
@@ -102,13 +94,11 @@ function DataLoader:getBatch(opt)
     local ri = self.iterators[split] -- get next index from iterator
     local ri_next = ri + 1 -- increment iterator
     if ri_next > max_index then ri_next = 1; wrapped = true end -- wrap back around
-	--这是改变了self中的迭代序号，为了方便下次去样本
     self.iterators[split] = ri_next
     ix = split_ix[ri]
     assert(ix ~= nil, 'bug: split ' .. split .. ' was accessed out of bounds with ' .. ri)
 
     -- fetch the image from h5
-	--ix是h5文件中的索引
     local img = self.h5_file:read('/images'):partial({ix,ix},{1,self.num_channels},
                             {1,self.max_image_size},{1,self.max_image_size})
     img_batch_raw[i] = img
@@ -124,7 +114,6 @@ function DataLoader:getBatch(opt)
       seq = torch.LongTensor(seq_per_img, self.seq_length)
       for q=1, seq_per_img do
         local ixl = torch.random(ix1,ix2)
-		--这是随机提取的，注定有同样的标记可能被提取多遍
         seq[{ {q,q} }] = self.h5_file:read('/labels'):partial({ixl, ixl}, {1,self.seq_length})
       end
     else
@@ -133,7 +122,6 @@ function DataLoader:getBatch(opt)
       seq = self.h5_file:read('/labels'):partial({ixl, ixl+seq_per_img-1}, {1,self.seq_length})
     end
     local il = (i-1)*seq_per_img+1
-	--将seq储存到label_batch中
     label_batch[{ {il,il+seq_per_img-1} }] = seq
 
     -- and record associated info as well

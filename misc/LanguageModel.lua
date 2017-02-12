@@ -15,14 +15,12 @@ function layer:__init(opt)
   self.vocab_size = utils.getopt(opt, 'vocab_size') -- required
   self.input_encoding_size = utils.getopt(opt, 'input_encoding_size')
   self.rnn_size = utils.getopt(opt, 'rnn_size')
-  self.num_layers = utils.getopt(opt, 'num_layers', 1)
+  self.num_layers = utils.getopt(opt, 'num_layers', 2)
   local dropout = utils.getopt(opt, 'dropout', 0)
   -- options for Language Model
   self.seq_length = utils.getopt(opt, 'seq_length')
-  --START和END是同一向量
   -- create the core lstm network. note +1 for both the START and END tokens
-  self.core = LSTM.lstm(self.input_encoding1_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
-  --lookuptable在torch中也是继承于nn.modules()，因此下面这句代码也是相当与构建一个vocab_size+1到input_encoding_size的过程，相当于一个encode过程
+  self.core = LSTM.lstm(self.input_encoding_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
   self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.input_encoding_size)
   self:_createInitState(1) -- will be lazily resized later during forward passes
 end
@@ -33,10 +31,7 @@ function layer:_createInitState(batch_size)
   if not self.init_state then self.init_state = {} end -- lazy init
   for h=1,self.num_layers*2 do
     -- note, the init state Must be zeros because we are using init_state to init grads in backward call too
-    -- 注意这里的num_layers*2应该是与prev_c和prev_h相对应
-	-- 检查各初始状态是否符合batch_size，若不符合则将其转换成batch_size的尺寸
-	-- 这里是将prev_c和prev_h分开存放的
-	if self.init_state[h] then
+    if self.init_state[h] then
       if self.init_state[h]:size(1) ~= batch_size then
         self.init_state[h]:resize(batch_size, self.rnn_size):zero() -- expand the memory
       end
@@ -44,21 +39,15 @@ function layer:_createInitState(batch_size)
       self.init_state[h] = torch.zeros(batch_size, self.rnn_size)
     end
   end
-  --设定状态的大小
-  --这num_state的大小为num_layers*2
   self.num_state = #self.init_state
 end
 
 function layer:createClones()
   -- construct the net clones
   print('constructing clones inside the LanguageModel')
-  --将网络的核心部分clone
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
   for t=2,self.seq_length+2 do
-  --If arguments are provided to the clone(...) function it also calls share(...) with those arguments on the cloned module after creating it,
-  --hence making a deep copy of this module with some shared parameters.所以这里的clones[t]中的参数都是共享的
-  --node这里的clones的长度为seq_length+2，第一个输入向量为图片向量，第二向量才是start向量
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
   end
@@ -76,7 +65,7 @@ function layer:parameters()
   local params = {}
   for k,v in pairs(p1) do table.insert(params, v) end
   for k,v in pairs(p2) do table.insert(params, v) end
-
+  
   local grad_params = {}
   for k,v in pairs(g1) do table.insert(grad_params, v) end
   for k,v in pairs(g2) do table.insert(grad_params, v) end
@@ -103,7 +92,7 @@ end
 --[[
 takes a batch of images and runs the model forward in sampling mode
 Careful: make sure model is in :evaluate() mode if you're calling this.
-Returns: a DxN LongTensor with integer elements 1..M,
+Returns: a DxN LongTensor with integer elements 1..M, 
 where D is sequence length and N is batch (so columns are sequences)
 --]]
 function layer:sample(imgs, opt)
@@ -114,7 +103,6 @@ function layer:sample(imgs, opt)
 
   local batch_size = imgs:size(1)
   self:_createInitState(batch_size)
-  --state中储存的是preV_c和prev_h
   local state = self.init_state
 
   -- we will write output predictions into tensor seq
@@ -135,12 +123,9 @@ function layer:sample(imgs, opt)
       -- take predictions from previous time step and feed them in
       if sample_max == 1 then
         -- use argmax "sampling"
-		--取得predictions的最大的值，作为预测值
-		--sampleLogprobs暂时不知道
         sampleLogprobs, it = torch.max(logprobs, 2)
         it = it:view(-1):long()
       else
-	    --这块是真的不清楚
         -- sample from the distribution of previous predictions
         local prob_prev
         if temperature == 1.0 then
@@ -156,17 +141,14 @@ function layer:sample(imgs, opt)
       xt = self.lookup_table:forward(it)
     end
 
-    if t >= 3 then
+    if t >= 3 then 
       seq[t-2] = it -- record the samples
       seqLogprobs[t-2] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
     end
 
     local inputs = {xt,unpack(state)}
     local out = self.core:forward(inputs)
-	--这是LSTM最后一层，已经经过softmax
-	--取预测值
     logprobs = out[self.num_state+1] -- last element is the output vector
-	--将每层的值存state中
     state = {}
     for i=1,self.num_state do table.insert(state, out[i]) end
   end
@@ -176,14 +158,11 @@ function layer:sample(imgs, opt)
 end
 
 --[[
-Implements beam search. Really tricky indexing stuff going on inside.
+Implements beam search. Really tricky indexing stuff going on inside. 
 Not 100% sure it's correct, and hard to fully unit test to satisfaction, but
-it seems to work, doesn't crash, gives expected looking outputs, and seems to
+it seems to work, doesn't crash, gives expected looking outputs, and seems to 
 improve performance, so I am declaring this correct.
 ]]--
-
---beam search启发式搜索，先忽略以后若能弄懂，在分析
-
 function layer:sample_beam(imgs, opt)
   local beam_size = utils.getopt(opt, 'beam_size', 10)
   local batch_size, feat_dim = imgs:size(1), imgs:size(2)
@@ -269,13 +248,13 @@ function layer:sample_beam(imgs, opt)
           if v.c == self.vocab_size+1 or t == self.seq_length+2 then
             -- END token special case here, or we reached the end.
             -- add the beam to a set of done beams
-            table.insert(done_beams, {seq = beam_seq[{ {}, vix }]:clone(),
+            table.insert(done_beams, {seq = beam_seq[{ {}, vix }]:clone(), 
                                       logps = beam_seq_logprobs[{ {}, vix }]:clone(),
                                       p = beam_logprobs_sum[vix]
                                      })
           end
         end
-
+        
         -- encode as vectors
         it = beam_seq[t-2]
         xt = self.lookup_table:forward(it)
@@ -305,14 +284,11 @@ input is a tuple of:
 2. torch.LongTensor of size DxN, elements 1..M
    where M = opt.vocab_size and D = opt.seq_length
 
-returns a (D+2)xNx(M+1) Tensor giving (normalized) log probabilities for the
-next token at every iteration of the LSTM (+2 because +1 for first dummy
+returns a (D+2)xNx(M+1) Tensor giving (normalized) log probabilities for the 
+next token at every iteration of the LSTM (+2 because +1 for first dummy 
 img forward, and another +1 because of START/END tokens shift)
 --]]
--- N是batch_size
--- 注意在这里训练的过程中输入的向量为确定的，正确的label
 function layer:updateOutput(input)
-  --这时input已经转换为encoding_size的向量
   local imgs = input[1]
   local seq = input[2]
   if self.clones == nil then self:createClones() end -- lazily create clones on first forward pass
@@ -320,7 +296,7 @@ function layer:updateOutput(input)
   assert(seq:size(1) == self.seq_length)
   local batch_size = seq:size(2)
   self.output:resize(self.seq_length+2, batch_size, self.vocab_size+1)
-
+  
   self:_createInitState(batch_size)
 
   self.state = {[0] = self.init_state}
@@ -341,12 +317,11 @@ function layer:updateOutput(input)
       xt = self.lookup_tables[t]:forward(it) -- NxK sized input (token embedding vectors)
     else
       -- feed in the rest of the sequence...
-	  --
       local it = seq[t-2]:clone()
       if torch.sum(it) == 0 then
         -- computational shortcut for efficiency. All sequences have already terminated and only
         -- contain null tokens from here on. We can skip the rest of the forward pass and save time
-        can_skip = true
+        can_skip = true 
       end
       --[[
         seq may contain zeros as null tokens, make sure we take them out to any arbitrary token
@@ -365,7 +340,6 @@ function layer:updateOutput(input)
 
     if not can_skip then
       -- construct the inputs
-	  --符合LSTM格式运算
       self.inputs[t] = {xt,unpack(self.state[t-1])}
       -- forward the network
       local out = self.clones[t]:forward(self.inputs[t])
@@ -380,29 +354,25 @@ function layer:updateOutput(input)
   return self.output
 end
 
---D是seq_length，M是vocal_size，N为batchsize
 --[[
 gradOutput is an (D+2)xNx(M+1) Tensor.
 --]]
 function layer:updateGradInput(input, gradOutput)
   local dimgs -- grad on input images
+
   -- go backwards and lets compute gradients
   local dstate = {[self.tmax] = self.init_state} -- this works when init_state is all zeros
-  --注意这里self.tmax的最大值为seq_length+2
   for t=self.tmax,1,-1 do
     -- concat state gradients and output vector gradients at time step t
     local dout = {}
-	--注意这里的gradoutput形式，它与模型输出相对应，可以将其看作是并行训练，不是逐层
     for k=1,#dstate[t] do table.insert(dout, dstate[t][k]) end
-    table.insert(dout,gradOutput[t])
-	--这里dout类型为tabel，why
-	-- 蠢了这里的self.clones[t]的类型为table，而且是从新创建的dout
+    table.insert(dout, gradOutput[t])
     local dinputs = self.clones[t]:backward(self.inputs[t], dout)
     -- split the gradient to xt and to state
     local dxt = dinputs[1] -- first element is the input vector
     dstate[t-1] = {} -- copy over rest to state grad
     for k=2,self.num_state+1 do table.insert(dstate[t-1], dinputs[k]) end
-
+    
     -- continue backprop of xt
     if t == 1 then
       dimgs = dxt
@@ -413,7 +383,6 @@ function layer:updateGradInput(input, gradOutput)
   end
 
   -- we have gradient on image, but for LongTensor gt sequence we only create an empty tensor - can't backprop
-  -- 这里只输出图片接口的梯度
   self.gradInput = {dimgs, torch.Tensor()}
   return self.gradInput
 end
@@ -437,7 +406,6 @@ in this criterion is as follows:
 The criterion must be able to accomodate variably-sized sequences by making sure
 the gradients are properly set to zeros where appropriate.
 --]]
---这里的seq中的值为词的索引
 function crit:updateOutput(input, seq)
   self.gradInput:resizeAs(input):zero() -- reset to zeros
   local L,N,Mp1 = input:size(1), input:size(2), input:size(3)
@@ -466,9 +434,7 @@ function crit:updateOutput(input, seq)
       -- if there is a non-null next token, enforce loss!
       if target_index ~= 0 then
         -- accumulate loss
-		--查看input[{t,b,target_index}]的值
         loss = loss - input[{ t,b,target_index }] -- log(p)
-		--为-1是因为肯定小于目标值所以上升，其他不管
         self.gradInput[{ t,b,target_index }] = -1
         n = n + 1
       end
