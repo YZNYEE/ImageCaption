@@ -60,10 +60,16 @@ function layer:createClones()
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
   self.combineSens = {}
+  self.constructAtt_l1s = {}
+  self.constructAtt_l2s = {}
+  self.constructAtt_os = {}
   for t=2,self.seq_length+1 do
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
 	self.combineSens[t] = self.combineSen:clone('weight','gradWeight')
+	self.constructAtt_l1s[t] = self.constructAtt_l1:clone()
+	self.constructAtt_l2s[t] = self.constructAtt_l2:clone()
+	self.constructAtt_os[t] = self.constructAtt_o:clone()
   end
 end
 
@@ -122,7 +128,11 @@ function layer:sample(imgs, opt)
   local temperature = utils.getopt(opt, 'temperature', 1.0)
   if sample_max == 1 and beam_size > 1 then return self:sample_beam(imgs, opt) end -- indirection for beam search
 
-  local batch_size = imgs:size(1)
+  local l_1 = imgs[1]
+  local l_2 = imgs[2]
+  local overall = imgs[3]
+
+  local batch_size = l_1:size(1)
   self:_createInitState(batch_size)
   local state = self.init_state
 
@@ -131,7 +141,7 @@ function layer:sample(imgs, opt)
   local seqLogprobs = torch.FloatTensor(self.seq_length, batch_size)
   local logprobs -- logprobs predicted in last time step
   -- A
-  local subseq = torch.LongTensor(self.seq_length, batch_size):zero()
+  local subseq = torch.LongTensor(self.seq_length + 1, batch_size):zero()
   -- A
   for t=1,self.seq_length+1 do
 
@@ -172,15 +182,15 @@ function layer:sample(imgs, opt)
 	local imgFeature = {}
 
 	if t > 1 then
-		local combineS = self.combineSens[t]:forward(subseq:sub(1,t-1):t())
+		local combineS = self.combineSen:forward(subseq:sub(1,t-1):t())
 		imgFeature[1] = self.constructAtt_l1:forward({l_1, combineS})
 		imgFeature[2] = self.constructAtt_l2:forward({l_2, combineS})
 		imgFeature[3] = self.constructAtt_o:forward({overall, combineS})
 		assert( #state == 3,'num_layers is not accordance with expectation')
 	else
-		ImgFeature[1] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-		ImgFeature[2] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-		ImgFeature[3] = overall
+		imgFeature[1] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
+		imgFeature[2] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
+		imgFeature[3] = overall
 	end
 
 	assert( #state == 3,'num_layers is not accordance with expectation')
@@ -188,7 +198,7 @@ function layer:sample(imgs, opt)
     inputs = {xt}
 	for i=1,3 do
 		table.insert(inputs, state[i])
-		table.insert(inputs, ImgFeature[i])
+		table.insert(inputs, imgFeature[i])
 	end
 
     local out = self.core:forward(inputs)
@@ -210,7 +220,7 @@ improve performance, so I am declaring this correct.
 ]]--
 function layer:sample_beam(imgs, opt)
   local beam_size = utils.getopt(opt, 'beam_size', 10)
-  local batch_size, feat_dim = imgs:size(1), imgs:size(2)
+  local batch_size, feat_dim = imgs[3]:size(1), imgs[3]:size(2)
   local function compare(a,b) return a.p > b.p end -- used downstream
 
   assert(beam_size <= self.vocab_size+1, 'lets assume this for now, otherwise this corner case causes a few headaches down the road. can be dealt with in future if needed')
@@ -218,6 +228,15 @@ function layer:sample_beam(imgs, opt)
   local seq = torch.LongTensor(self.seq_length, batch_size):zero()
   local seqLogprobs = torch.FloatTensor(self.seq_length, batch_size)
   -- lets process every image independently for now, for simplicity
+
+  local l_1 = imgs[1]
+  local l_2 = imgs[2]
+  local overall = imgs[3]
+
+  self.constructAtt_l1:changeBatchsize(beam_size)
+  self.constructAtt_l2:changeBatchsize(beam_size)
+  self.constructAtt_o:changeBatchsize(beam_size)
+  self.combineSen:changeBatchsize(beam_size)
 
   for k=1,batch_size do
 
@@ -231,12 +250,17 @@ function layer:sample_beam(imgs, opt)
     local beam_logprobs_sum = torch.zeros(beam_size) -- running sum of logprobs for each beam
     local logprobs -- logprobs predicted in last time step, shape (beam_size, vocab_size+1)
     local done_beams = {}
-    local subseq = torch.LongTensor(self.seq_length, beam_size):zero()
+    local subseq = torch.LongTensor(self.seq_length+1, beam_size):zero()
+
+	local l_1_k = l_1[{{k,k}}]:expand(beam_size, l_1:size(2), l_1:size(3))
+	local l_2_k = l_2[{{k,k}}]:expand(beam_size, l_2:size(2), l_2:size(3))
+	local overall_k = overall[{{k,k}}]:expand(beam_size, feat_dim)
+
 	for t=1,self.seq_length+1 do
 
       local xt, it, sampleLogprobs
       local new_state
-      if t == 2 then
+      if t == 1 then
         -- feed in the start tokens
         it = torch.LongTensor(beam_size):fill(self.vocab_size+1)
         xt = self.lookup_table:forward(it)
@@ -252,7 +276,7 @@ function layer:sample_beam(imgs, opt)
         local candidates = {}
         local cols = math.min(beam_size,ys:size(2))
         local rows = beam_size
-        if t == 3 then rows = 1 end -- at first time step only the first beam is active
+        if t == 2 then rows = 1 end -- at first time step only the first beam is active
         for c=1,cols do -- for each column (word, essentially)
           for q=1,rows do -- for each beam expansion
             -- compute logprob of expanding beam q with word in (sorted) position c
@@ -284,8 +308,8 @@ function layer:sample_beam(imgs, opt)
             new_state[state_ix][vix] = state[state_ix][v.q]
           end
           -- append new end terminal at the end of this beam
-          beam_seq[{ t-2, vix }] = v.c -- c'th word is the continuation
-          beam_seq_logprobs[{ t-2, vix }] = v.r -- the raw logprob here
+          beam_seq[{ t-1, vix }] = v.c -- c'th word is the continuation
+          beam_seq_logprobs[{ t-1, vix }] = v.r -- the raw logprob here
           beam_logprobs_sum[vix] = v.p -- the new (sum) logprob along this beam
 
           if v.c == self.vocab_size+1 or t == self.seq_length+1 then
@@ -310,15 +334,15 @@ function layer:sample_beam(imgs, opt)
 	  local imgFeature = {}
 
 	  if t > 1 then
-		local combineS = self.combineSens[t]:forward(subseq:sub(1,t-1):t())
-		imgFeature[1] = self.constructAtt_l1:forward({l_1, combineS})
-		imgFeature[2] = self.constructAtt_l2:forward({l_2, combineS})
-		imgFeature[3] = self.constructAtt_o:forward({overall, combineS})
+		local combineS = self.combineSen:forward(subseq:sub(1,t-1):t())
+		imgFeature[1] = self.constructAtt_l1:forward({l_1_k, combineS})
+		imgFeature[2] = self.constructAtt_l2:forward({l_2_k, combineS})
+		imgFeature[3] = self.constructAtt_o:forward({overall_k, combineS})
 		assert( #state == 3,'num_layers is not accordance with expectation')
 	  else
-		imgFeature[1] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-		imgFeature[2] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-		imgFeature[3] = overall
+		imgFeature[1] = torch.FloatTensor(beam_size, self.input_encoding_size):zero():type(self._type)
+		imgFeature[2] = torch.FloatTensor(beam_size, self.input_encoding_size):zero():type(self._type)
+		imgFeature[3] = overall_k
 	  end
 
 	  assert( #state == 3,'num_layers is not accordance with expectation')
@@ -415,14 +439,14 @@ function layer:updateOutput(input)
 	  local imgFeature = {}
 
 	  if t > 1 then
-		local comseq = self.subseq:sub(1,t-1):t():clone()
+		local comseq = self.subseq:sub(1,t-1):t()
 		comseq[torch.eq(comseq, 0)] = 1
 		self.combineS[t] = self.combineSens[t]:forward(comseq)
 		--print({self.combineS[t]:size(1), self.combineS[t]:size(2)})
 		--print({l_1:size(1), l_1:size(2), l_1:size(3)})
-		imgFeature[1] = self.constructAtt_l1:forward({l_1, self.combineS[t]})
-		imgFeature[2] = self.constructAtt_l2:forward({l_2, self.combineS[t]})
-		imgFeature[3] = self.constructAtt_o:forward({overall, self.combineS[t]})
+		imgFeature[1] = self.constructAtt_l1s[t]:forward({l_1, self.combineS[t]})
+		imgFeature[2] = self.constructAtt_l2s[t]:forward({l_2, self.combineS[t]})
+		imgFeature[3] = self.constructAtt_os[t]:forward({overall, self.combineS[t]})
 		assert( #self.state[t-1] == 3,'num_layers is not accordance with expectation')
 	  else
 		imgFeature[1] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
@@ -481,16 +505,16 @@ function layer:updateGradInput(input, gradOutput)
 	-- print({self.tmax, t})
 	local dgl_1, dgl_2, dover, dsen
 	if t > 1 then
-		local g1 = self.constructAtt_l1:backward({input[1], self.combineS[t]}, gl_1)
+		local g1 = self.constructAtt_l1s[t]:backward({input[1], self.combineS[t]}, gl_1)
 		dgl_1 = g1[1]:clone()
 		dsen = g1[2]:clone()
-		local g2 = self.constructAtt_l2:backward({input[2], self.combineS[t]}, gl_2)
+		local g2 = self.constructAtt_l2s[t]:backward({input[2], self.combineS[t]}, gl_2)
 		dgl_2 = g2[1]:clone()
 		dsen:add(g2[2])
-		local g3 = self.constructAtt_o:backward({input[3], self.combineS[t]}, overall)
+		local g3 = self.constructAtt_os[t]:backward({input[3], self.combineS[t]}, overall)
 		dover = g3[1]:clone()
 		dsen:add(g3[2])
-		local comseq = self.subseq:sub(1,t-1):t():clone()
+		local comseq = self.subseq:sub(1,t-1):t()
 		comseq[torch.eq(comseq, 0)] = 1
 		self.combineSens[t]:backward(comseq, dsen)
 	end

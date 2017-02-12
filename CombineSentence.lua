@@ -74,13 +74,17 @@ function layer:getModuleList()
 
 end
 
+function layer:changeBatchsize(batch_size)
+	self.batch_size = batch_size
+end
+
 function layer:parameters()
 
 	local p1,g1 = self.lookup_table:parameters()
 	local params={}
 	local grad_params={}
 	for k,v in pairs(p1) do table.insert(params, v) end
-	for k,v in pairs(g1) do table.insert(params, v) end
+	for k,v in pairs(g1) do table.insert(grad_params, v) end
 
 	return params, grad_params
 

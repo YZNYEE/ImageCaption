@@ -100,7 +100,7 @@ local function gradCheckLM()
   opt.rnn_size = 8
   opt.num_layers = 3
   opt.dropout = 0
-  opt.seq_length = 1
+  opt.seq_length = 7
   opt.batch_size = 6
 
   opt.local_img_num = 9
@@ -173,14 +173,15 @@ local function gradCheck()
   local opt = {}
   opt.vocab_size = 5
   opt.input_encoding_size = 4
+  opt.encoding_size = 4
   opt.rnn_size = 8
-  opt.num_layers = 2
+  opt.num_layers = 3
   opt.dropout = 0
   opt.seq_length = 7
   opt.batch_size = 6
 
-　opt.local_img_num = 9
-　opt.get_top_num = 6
+  opt.local_img_num = 9
+  opt.get_top_num = 6
 
 
   local lm = nn.LanguageModel(opt)
@@ -191,34 +192,49 @@ local function gradCheck()
   local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
   seq[{ {4, 7}, 1 }] = 0
   seq[{ {5, 7}, 4 }] = 0
-  local imgs = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
+  local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
+  local img_l2 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
+  local img_o = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
 
   -- evaluate the analytic gradient
-  local output = lm:forward{imgs, seq}
+  local output = lm:forward{img_l1, img_l2, img_o, seq}
   local loss = crit:forward(output, seq)
   local gradOutput = crit:backward(output, seq)
-  local gradInput, dummy = unpack(lm:backward({imgs, seq}, gradOutput))
+  local gradInput = lm:backward({img_l1, img_l2, img_o, seq}, gradOutput)
 
   -- create a loss function wrapper
-  local function f(x)
-    local output = lm:forward{x, seq}
+  local function f1(x)
+    local output = lm:forward{x, img_l2, img_o, seq}
     local loss = crit:forward(output, seq)
     return loss
   end
 
-  local gradInput_num = gradcheck.numeric_gradient(f, imgs, 1, 1e-6)
+  local function f2(x)
+    local output = lm:forward{img_l1, x, img_o, seq}
+    local loss = crit:forward(output, seq)
+    return loss
+  end
 
-  -- print(gradInput)
-  -- print(gradInput_num)
-  -- local g = gradInput:view(-1)
-  -- local gn = gradInput_num:view(-1)
-  -- for i=1,g:nElement() do
-  --   local r = gradcheck.relative_error(g[i],gn[i])
-  --   print(i, g[i], gn[i], r)
-  -- end
+  local function f3(x)
+    local output = lm:forward{img_l1, img_l2, x, seq}
+    local loss = crit:forward(output, seq)
+    return loss
+  end
 
-  tester:assertTensorEq(gradInput, gradInput_num, 1e-4)
-  tester:assertlt(gradcheck.relative_error(gradInput, gradInput_num, 1e-8), 5e-4)
+  local gradInput_num = gradcheck.numeric_gradient(f1, img_l1, 1, 1e-6)
+
+  tester:assertTensorEq(gradInput[1], gradInput_num, 1e-4)
+  tester:assertlt(gradcheck.relative_error(gradInput[1], gradInput_num, 1e-8), 5e-4)
+
+  local gradInput_num = gradcheck.numeric_gradient(f2, img_l2, 1, 1e-6)
+
+  tester:assertTensorEq(gradInput[2], gradInput_num, 1e-4)
+  tester:assertlt(gradcheck.relative_error(gradInput[2], gradInput_num, 1e-8), 5e-4)
+
+  local gradInput_num = gradcheck.numeric_gradient(f3, img_o, 1, 1e-6)
+
+  tester:assertTensorEq(gradInput[3], gradInput_num, 1e-4)
+  tester:assertlt(gradcheck.relative_error(gradInput[3], gradInput_num, 1e-8), 5e-4)
 end
 
 local function overfit()
@@ -226,14 +242,15 @@ local function overfit()
   local opt = {}
   opt.vocab_size = 5
   opt.input_encoding_size = 7
+  opt.encoding_size = 7
   opt.rnn_size = 24
-  opt.num_layers = 1
+  opt.num_layers = 3
   opt.dropout = 0
   opt.seq_length = 7
   opt.batch_size = 6
 
   opt.local_img_num = 9
-　opt.get_top_num = 6
+  opt.get_top_num = 6
 
   local lm = nn.LanguageModel(opt)
   local crit = nn.LanguageModelCriterion()
@@ -243,22 +260,28 @@ local function overfit()
   local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
   seq[{ {4, 7}, 1 }] = 0
   seq[{ {5, 7}, 4 }] = 0
-  local imgs = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
+  local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
+  local img_l2 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
+  local img_o = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
 
   local params, grad_params = lm:getParameters()
   print('number of parameters:', params:nElement(), grad_params:nElement())
-  local lstm_params = 4*(opt.input_encoding_size + opt.rnn_size)*opt.rnn_size + opt.rnn_size*4*2
+
+  local gru_params_1 = 3*(opt.input_encoding_size * 2 + opt.rnn_size )*opt.rnn_size + 3*3*opt.rnn_size
+  local gru_params_2 = 3*(opt.input_encoding_size + opt.rnn_size * 2 )*opt.rnn_size + 3*3*opt.rnn_size
+
   local output_params = opt.rnn_size * (opt.vocab_size + 1) + opt.vocab_size+1
-  local table_params = (opt.vocab_size + 1) * opt.input_encoding_size
-  local expected_params = lstm_params + output_params + table_params
+  local table_params = (opt.vocab_size + 1) * opt.input_encoding_size * 2
+
+  local expected_params = gru_params_1 + gru_params_2 * 2 + output_params + table_params
   print('expected:', expected_params)
 
   local function lossFun()
     grad_params:zero()
-    local output = lm:forward{imgs, seq}
+    local output = lm:forward{img_l1, img_l2, img_o, seq}
     local loss = crit:forward(output, seq)
     local gradOutput = crit:backward(output, seq)
-    lm:backward({imgs, seq}, gradOutput)
+    lm:backward({img_l1, img_l2, img_o, seq}, gradOutput)
     return loss
   end
 
@@ -284,19 +307,22 @@ local function sample()
   local opt = {}
   opt.vocab_size = 5
   opt.input_encoding_size = 4
+  opt.encoding_size = 4
   opt.rnn_size = 8
-  opt.num_layers = 2
+  opt.num_layers = 3
   opt.dropout = 0
   opt.seq_length = 7
   opt.batch_size = 6
 
-　opt.local_img_num = 9
-　opt.get_top_num = 6
+  opt.local_img_num = 9
+  opt.get_top_num = 6
 
   local lm = nn.LanguageModel(opt)
 
-  local imgs = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
-  local seq = lm:sample(imgs)
+  local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
+  local img_l2 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
+  local img_o = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
+  local seq = lm:sample({img_l1, img_l2, img_o})
 
   tester:assertTensorSizeEq(seq, {opt.seq_length, opt.batch_size})
   tester:asserteq(seq:type(), 'torch.LongTensor')
@@ -316,21 +342,24 @@ local function sample_beam()
   local opt = {}
   opt.vocab_size = 10
   opt.input_encoding_size = 4
+  opt.encoding_size = 4
   opt.rnn_size = 8
-  opt.num_layers = 1
+  opt.num_layers = 3
   opt.dropout = 0
   opt.seq_length = 7
   opt.batch_size = 6
 
-　opt.local_img_num = 9
-　opt.get_top_num = 6
+  opt.local_img_num = 9
+  opt.get_top_num = 6
 
   local lm = nn.LanguageModel(opt)
 
-  local imgs = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
+  local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
+  local img_l2 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
+  local img_o = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
 
-  local seq_vanilla, logprobs_vanilla = lm:sample(imgs)
-  local seq, logprobs = lm:sample(imgs, {beam_size = 1})
+  local seq_vanilla, logprobs_vanilla = lm:sample({img_l1, img_l2, img_o})
+  local seq, logprobs = lm:sample({img_l1, img_l2, img_o}, {beam_size = 1})
 
   -- check some basic I/O, types, etc.
   tester:assertTensorSizeEq(seq, {opt.seq_length, opt.batch_size})
@@ -348,7 +377,7 @@ local function sample_beam()
   tester:assertTensorEq(logprobs_vanilla, logprobs, 1e-6) -- logprobs too
 
   -- doing beam search with higher beam size should yield higher likelihood sequences
-  local seq2, logprobs2 = lm:sample(imgs, {beam_size = 8})
+  local seq2, logprobs2 = lm:sample({img_l1, img_l2, img_o}, {beam_size = 8})
   local logsum = torch.sum(logprobs, 1)
   local logsum2 = torch.sum(logprobs2, 1)
   print('')
@@ -367,11 +396,11 @@ end
 tests.doubleApiForwardTest = forwardApiTestFactory('torch.DoubleTensor')
 tests.floatApiForwardTest = forwardApiTestFactory('torch.FloatTensor')
 tests.cudaApiForwardTest = forwardApiTestFactory('torch.CudaTensor')
--- tests.gradCheck = gradCheck
+tests.gradCheck = gradCheck
 tests.gradCheckLM = gradCheckLM
--- tests.overfit = overfit
--- tests.sample = sample
--- tests.sample_beam = sample_beam
+tests.overfit = overfit
+tests.sample = sample
+tests.sample_beam = sample_beam
 
 tester:add(tests)
 tester:run()

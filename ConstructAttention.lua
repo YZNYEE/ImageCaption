@@ -23,6 +23,10 @@ function layer:__init(opt, subject)
 
 end
 
+function layer:changeBatchsize(batch_size)
+	self.batch_size = batch_size
+end
+
 function layer:updateOutput(inputs)
 
 	-- inputs[1] is img_feature(DX196X512)
@@ -153,7 +157,7 @@ function layer:updateGradInput(inputs, GradOutput)
 			len = size_img[2]
 		end
 
-		local grad = gradoutput:div(len)
+		local grad = gradoutput:clone()
 
 		-- print('1th evaluate')
 		-- print(abssum(grad, grad_1))
