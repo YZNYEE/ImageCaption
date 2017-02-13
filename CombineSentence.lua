@@ -41,6 +41,7 @@ end
 -- inputs is DxN LongTensor. D is batch_size. N is the length
 function layer:updateOutput(inputs)
 
+	self.batch_size = inputs:size(1)
 	self.size = inputs:size()
 	self.output = nil
 
@@ -59,6 +60,8 @@ end
 
 function layer:updateGradInput(inputs, gradOutput)
 
+	self.batch_size = inputs:size(1)
+
 	local gout = gradOutput:div(self.size[2])
 	local dlookup_table = torch.FloatTensor(self.batch_size, self.seq_length, self.encoding_size):zero():type(self._type)
 	for j = 1,self.batch_size do dlookup_table[j] = torch.expand(gout[j]:resize(1, self.encoding_size), self.seq_length, self.encoding_size) end
@@ -68,7 +71,7 @@ function layer:updateGradInput(inputs, gradOutput)
 
 end
 
-function layer:getModuleList()
+function layer:getModulesList()
 
 	return {self.lookup_table}
 

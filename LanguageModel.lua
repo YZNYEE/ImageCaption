@@ -74,8 +74,8 @@ function layer:createClones()
 end
 
 function layer:getModulesList()
-	local g={self.core, self.lookup_table}
-	for k,v in pairs(self.combineSen:getModulesList()) do table.insert(g, v) end
+	local g={self.core, self.lookup_table, self.combineSen.lookup_table}
+	return g
 end
 
 function layer:parameters()
@@ -105,14 +105,14 @@ function layer:training()
   if self.clones == nil then self:createClones() end -- create these lazily if needed
   for k,v in pairs(self.clones) do v:training() end
   for k,v in pairs(self.lookup_tables) do v:training() end
-  for k,v in pairs(self.combineSens) do v:training() end
+  for k,v in pairs(self.combineSens) do v.lookup_table:training() end
 end
 
 function layer:evaluate()
   if self.clones == nil then self:createClones() end -- create these lazily if needed
   for k,v in pairs(self.clones) do v:evaluate() end
   for k,v in pairs(self.lookup_tables) do v:evaluate() end
-  for k,v in pairs(self.combineSens) do v:evaluate() end
+  for k,v in pairs(self.combineSens) do v.lookup_table:evaluate() end
 end
 
 --[[
@@ -133,6 +133,7 @@ function layer:sample(imgs, opt)
   local overall = imgs[3]
 
   local batch_size = l_1:size(1)
+  self.batch_size = batch_size
   self:_createInitState(batch_size)
   local state = self.init_state
 
@@ -400,6 +401,7 @@ function layer:updateOutput(input)
   self.subseq:sub(2,self.seq_length+1, 1,batch_size):copy(seq)
   self.subseq:sub(1,1):fill(self.vocab_size+1)
   self.combineS = {}
+  self.batch_size = batch_size
 
   for t=1,self.seq_length+1 do
 
@@ -459,6 +461,7 @@ function layer:updateOutput(input)
 		  table.insert(self.inputs[t], self.state[t-1][i])
 		  table.insert(self.inputs[t], imgFeature[i]:clone())
 	  end
+
 	  local out = self.clones[t]:forward(self.inputs[t])
       -- process the outputs
       self.output[t] = out[self.num_state+1] -- last element is the output vector

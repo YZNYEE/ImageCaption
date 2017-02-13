@@ -204,7 +204,7 @@ local function gradCheck_ConstructAttention()
 	local conatt = nn.ConstructAttention(opt, opt.subject)
 	conatt:type(dtype)
 
-	local img_local = torch.randn(opt.batch_size, opt.local_img_num, opt.encoding_size):type(dtype)
+	local img_local = torch.randn(opt.batch_size, opt.local_img_num + 1, opt.encoding_size):type(dtype)
 	local sen = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
 
 	local output = conatt:forward({img_local, sen})
