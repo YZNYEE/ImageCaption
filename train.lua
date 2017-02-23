@@ -102,11 +102,17 @@ if string.len(opt.start_from) > 0 then
   print('initializing weights from ' .. opt.start_from)
   local loaded_checkpoint = torch.load(opt.start_from)
   protos = loaded_checkpoint.protos
-  net_utils.unsanitize_gradients(protos.cnn)
+  -- net_utils.unsanitize_gradients(protos.cnn)
   local lm_modules = protos.lm:getModulesList()
   for k,v in pairs(lm_modules) do net_utils.unsanitize_gradients(v) end
   protos.crit = nn.LanguageModelCriterion() -- not in checkpoints, create manually
   protos.expander = nn.FeatExpander(opt.seq_per_img) -- not in checkpoints, create manually
+
+  local cnn_backend = opt.backend
+  if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
+  local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
+  protos.cnn_part = cnn_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
+
 else
   -- create protos from scratch
   -- intialize language model
@@ -115,13 +121,14 @@ else
   lmOpt.input_encoding_size = opt.input_encoding_size
   lmOpt.encoding_size = opt.input_encoding_size
   lmOpt.rnn_size = opt.rnn_size
-  lmOpt.num_layers = 3
+  lmOpt.num_layers = 2
   lmOpt.dropout = opt.drop_prob_lm
   lmOpt.seq_length = loader:getSeqLength()
   lmOpt.batch_size = opt.batch_size * opt.seq_per_img
 
   lmOpt.get_top_num = opt.get_top_num
   lmOpt.local_img_num = 14*14
+  lmOpt.num_of_local_img = 1
 
   protos.lm = nn.LanguageModel(lmOpt)
   -- initialize the ConvNet
@@ -203,7 +210,7 @@ local function eval_split(split, evalopt)
     n = n + data.images:size(1)
 
     -- forward the model to get loss
-    local feats = cnn_utils.forward(protos.cnn_part, {23, 30, 40}, data.images)
+    local feats = cnn_utils.forward(protos.cnn_part, {30, 40}, data.images)
 	local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
 --    local expanded_feats = protos.expander:forward(feats)
 	table.insert(expanded_feats, data.labels)
@@ -268,7 +275,7 @@ local function lossFun()
 
   -- forward the ConvNet on images (most work happens here)
   --local feats = protos.cnn:forward(data.images)
-  local feats = cnn_utils.forward(protos.cnn_part, {23, 30, 40}, data.images)
+  local feats = cnn_utils.forward(protos.cnn_part, {30, 40}, data.images)
   local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
 -- we have to expand out image features, once for each sentence
 --  local expanded_feats = protos.expander:forward(feats)

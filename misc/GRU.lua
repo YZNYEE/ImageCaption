@@ -45,12 +45,6 @@ function GRU.gru(input_size, output_size, rnn_size, n, dropout)
 	table.insert(outputs, next_h)
   end
 
-  local top_h = outputs[#outputs]
-  if dropout > 0 then top_h = nn.Dropout(dropout)(top_h):annotate{name='drop_final'} end
-  local proj = nn.Linear(rnn_size, output_size)(top_h):annotate{name='decoder'}
-  local logsoft = nn.LogSoftMax()(proj)
-  table.insert(outputs, logsoft)
-
   return nn.gModule(inputs, outputs)
 
 end

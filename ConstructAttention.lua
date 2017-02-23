@@ -105,9 +105,9 @@ function layer:updateOutput(inputs)
 		assert(size_sen[1] == self.batch_size)
 		assert(size_img[2] == size_sen[2], 'dimension is not accordance')
 
-		self.beattention = self.eltwise:forward({img, sen})
-		self.attention = self.Tanh:forward(self.beattention)
-		self.output = self.eltwise_out:forward({img, self.attention})
+		local beattention = self.eltwise:forward({img, sen})
+		local attention = self.Tanh:forward(beattention)
+		self.output = self.eltwise_out:forward({img, attention})
 
 		return self.output
 
@@ -129,14 +129,26 @@ function layer:updateGradInput(inputs, GradOutput)
 
 	local function overall_grad(inputs, gradoutput)
 
-		local grad= self.eltwise_out:backward({inputs[1], self.attention}, gradoutput)
+		local img = inputs[1]
+		local sen = inputs[2]
+		local size_img = img:size()
+		local size_sen = sen:size()
+		assert(size_img[1] == self.batch_size)
+		assert(size_sen[1] == self.batch_size)
+		assert(size_img[2] == size_sen[2], 'dimension is not accordance')
+
+		local beattention = self.eltwise:forward({img, sen})
+		local attention = self.Tanh:forward(beattention)
+
+		local grad= self.eltwise_out:backward({img, attention}, gradoutput)
 		local gimg = grad[1]
 		local gsen = grad[2]
-		local gradatt = self.Tanh:backward(self.beattention, gsen)
+		local gradatt = self.Tanh:backward(beattention, gsen)
 		grad = self.eltwise:backward(inputs, gradatt)
 		local grad_img = grad[1]
 		local grad_sen = grad[2]
 		grad_img:add(gimg)
+
 		return {grad_img, grad_sen}
 	end
 
