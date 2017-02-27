@@ -172,6 +172,7 @@ end
 protos.feature_table = {}
 for i=1,string.len(opt.index_of_feature),2 do
 	  local num = string.sub(opt.index_of_feature, i, i+1)
+	  num = tonumber(num)
 	  table.insert(protos.feature_table, num)
 end
 print(protos.feature_table)
@@ -229,7 +230,7 @@ local function eval_split(split, evalopt)
     n = n + data.images:size(1)
 
     -- forward the model to get loss
-    local feats = cnn_utils.forward(protos.cnn_part, {40}, data.images)
+    local feats = cnn_utils.forward(protos.cnn_part, protos.feature_table , data.images)
 	local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
 --    local expanded_feats = protos.expander:forward(feats)
 	table.insert(expanded_feats, data.labels)
@@ -294,7 +295,7 @@ local function lossFun()
 
   -- forward the ConvNet on images (most work happens here)
   --local feats = protos.cnn:forward(data.images)
-  local feats = cnn_utils.forward(protos.cnn_part, {40}, data.images)
+  local feats = cnn_utils.forward(protos.cnn_part, protos.feature_table , data.images)
   local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
 -- we have to expand out image features, once for each sentence
 --  local expanded_feats = protos.expander:forward(feats)

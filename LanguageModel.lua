@@ -141,7 +141,9 @@ function layer:sample(imgs, opt)
   for t=1,self.seq_length+1 do
 
     local xt, it, sampleLogprobs
-    if t == 1 then
+	if t == 1 then
+	  xt = imgs[self.num_of_local_img+1]
+    elseif t == 1 then
       -- feed in the start tokens
       it = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       xt = self.lookup_table:forward(it)
