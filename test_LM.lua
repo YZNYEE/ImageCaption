@@ -5,7 +5,7 @@ and that everything gradient checks.
 --]]
 
 require 'torch'
-require 'LanguageModel'
+require 'LanguageModel_new'
 
 local gradcheck = require 'misc.gradcheck'
 

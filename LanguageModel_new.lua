@@ -36,6 +36,8 @@ function layer:__init(opt)
 
   self.combineSen = nn.SenInfo(opt)
 
+  self:_createInitState_img(1)
+
 end
 
 function layer:_createInitState(batch_size)
@@ -81,7 +83,7 @@ function layer:createClones()
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
   self.combineSens = {self.combineSen}
-  for t=2,self.seq_length+2 do
+  for t=2,self.seq_length+1 do
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
 	self.combineSens[t] = self.combineSen:clone('weight','gradWeight')
@@ -92,7 +94,7 @@ function layer:createClones_img()
 
   print('constructing clones inside the core_img')
   self.clones_img = {}
-  for t=1,self.seq_length+2 do
+  for t=1,self.seq_length+1 do
 	self.clones_img[t] = {}
 	for h=1,self.num_of_local_img do
 		if t==1 and h==1 then
