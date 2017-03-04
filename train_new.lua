@@ -6,7 +6,7 @@ require 'loadcaffe'
 -- local imports
 local utils = require 'misc.utils'
 require 'misc.DataLoader'
-require 'LanguageModel'
+require 'LanguageModel_new'
 local net_utils = require 'misc.net_utils'
 local cnn_utils = require 'cnn_utils'
 require 'misc.optim_updates'
@@ -194,6 +194,7 @@ local thin_lm = protos.lm:clone()
 thin_lm.core:share(protos.lm.core, 'weight', 'bias') -- TODO: we are assuming that LM has specific members! figure out clean way to get rid of, not modular.
 thin_lm.lookup_table:share(protos.lm.lookup_table, 'weight', 'bias')
 thin_lm.combineSen.lookup_table:share(protos.lm.combineSen.lookup_table, 'weight', 'bias')
+thin_lm.core_img:share(protos.lm.core_img, 'weight', 'bias')
 
 -- local thin_cnn = protos.cnn:clone('weight', 'bias')
 -- sanitize all modules of gradient storage so that we dont save big checkpoints

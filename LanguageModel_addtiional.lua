@@ -83,7 +83,7 @@ function layer:createClones()
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
   self.combineSens = {self.combineSen}
-  for t=2,self.seq_length+1 do
+  for t=2,self.seq_length+2 do
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
 	self.combineSens[t] = self.combineSen:clone('weight','gradWeight')
@@ -94,7 +94,7 @@ function layer:createClones_img()
 
   print('constructing clones inside the core_img')
   self.clones_img = {}
-  for t=1,self.seq_length+1 do
+  for t=1,self.seq_length+2 do
 	self.clones_img[t] = {}
 	for h=1,self.num_of_local_img+1 do
 		if t==1 and h==1 then
@@ -192,10 +192,12 @@ function layer:sample(imgs, opt)
   -- A
   local subseq = torch.LongTensor(self.seq_length + 1, batch_size):zero()
   -- A
-  for t=1,self.seq_length+1 do
+  for t=1,self.seq_length+2 do
 
     local xt, it, sampleLogprobs
     if t == 1 then
+	  xt = imgs[self.num_of_local_img + 1]
+	elseif t == 2 then
       -- feed in the start tokens
       it = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       xt = self.lookup_table:forward(it)
@@ -221,17 +223,17 @@ function layer:sample(imgs, opt)
       xt = self.lookup_table:forward(it)
     end
 
-    if t >= 2 then
-      seq[t-1] = it -- record the samples
-      seqLogprobs[t-1] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
+    if t > 2 then
+      seq[t-2] = it -- record the samples
+      seqLogprobs[t-2] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
 	end
 
-	subseq[t] = it
+	if t > 1 then subseq[t-1] = it end
 
 	local imgFeature = {}
 
 	if t > 1 then
-		local combineS = self.combineSen:forward(subseq:sub(1,t):t())
+		local combineS = self.combineSen:forward(subseq:sub(1,t-1):t())
 		for i=1,self.num_of_local_img do
 			imgFeature[i] = self.constructAtt_ls:forward({imgs[i], combineS})
 		end
@@ -438,7 +440,7 @@ function layer:updateOutput(input)
 
   assert(seq:size(1) == self.seq_length)
   local batch_size = seq:size(2)
-  self.output:resize(self.seq_length+1, batch_size, self.vocab_size+1)
+  self.output:resize(self.seq_length+2, batch_size, self.vocab_size+1)
 
   self:_createInitState(batch_size)
   self:_createInitState_img(batch_size)
@@ -457,18 +459,20 @@ function layer:updateOutput(input)
   self.combineS = {}
   self.batch_size = batch_size
 
-  for t=1,self.seq_length+1 do
+  for t=1,self.seq_length+2 do
 
     local can_skip = false
     local xt
-    if t == 1 then
+	if t == 1 then
+	  xt = input[self.num_of_local_img+1]
+    elseif t == 1 then
       -- feed in the start tokens
       local it = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       self.lookup_tables_inputs[t] = it
       xt = self.lookup_tables[t]:forward(it) -- NxK sized input (token embedding vectors)
     else
       -- feed in the rest of the sequence...
-      local it = seq[t-1]:clone()
+      local it = seq[t-2]:clone()
       if torch.sum(it) == 0 then
         -- computational shortcut for efficiency. All sequences have already terminated and only
         -- contain null tokens from here on. We can skip the rest of the forward pass and save time
@@ -495,7 +499,7 @@ function layer:updateOutput(input)
 	  local imgFeature = {}
 
 	  if t > 1 then
-		local comseq = self.subseq:sub(1,t):t()
+		local comseq = self.subseq:sub(1,t-1):t()
 		comseq[torch.eq(comseq, 0)] = 1
 		self.combineS[t] = self.combineSens[t]:forward(comseq)
 		for i=1,self.num_of_local_img do
@@ -567,7 +571,8 @@ function layer:updateGradInput(input, gradOutput)
 
     -- continue backprop of xt
 	local it = self.lookup_tables_inputs[t]
-	self.lookup_tables[t]:backward(it, dxt) -- backprop into lookup table
+	if t>1 then self.lookup_tables[t]:backward(it, dxt) -- backprop into lookup table
+	else dgls[self.num_of_local_img+1]:add(dxt)
 
 	-- print({self.tmax, t})
 

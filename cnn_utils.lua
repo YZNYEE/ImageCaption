@@ -1,6 +1,6 @@
 require 'hdf5'
 local utils = require 'misc.utils'
-
+DataLoader = require'misc.DataLoader'
 local cnn_utils = {}
 
 function cnn_utils.build_cnn(cnn, opt)
@@ -65,7 +65,7 @@ function cnn_utils.cnn_translate(givenlayer, givenpath, cnn_part)
 
 	local num = #givenlayer
 	local num_path = #givenpath
-	assert( num == num_path, 'inconsistant')
+	assert( num == #num_path, 'inconsistant')
 	assert( num ~= 0, 'givenlayer is null')
 	assert( num <= 40, 'number layer is wrong')
 
@@ -73,7 +73,6 @@ function cnn_utils.cnn_translate(givenlayer, givenpath, cnn_part)
 		assert(num[i] <= 40, 'No of layer is beyond the bound')
 	end
 
-	DataLoader = require'misc.DataLoader'
 	local h5_file = {}
 
 	for i=1,num do
@@ -89,6 +88,7 @@ function cnn_utils.cnn_translate(givenlayer, givenpath, cnn_part)
 
 		local input = img
 		local index = 1
+		local count = 1
 		for j=1,#cnn_part do
 
 			local output = cnn_part[j]:forward(input)
@@ -97,6 +97,7 @@ function cnn_utils.cnn_translate(givenlayer, givenpath, cnn_part)
 
 				index = index + 1
 				h5_file[count]:write('/imgs', output)
+				count = count + 1
 
 			end
 

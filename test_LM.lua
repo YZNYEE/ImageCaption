@@ -276,10 +276,14 @@ local function overfit()
   print('number of parameters:', params:nElement(), grad_params:nElement())
 
   local gru_params_1 = 3*(opt.input_encoding_size * 2 + opt.rnn_size )*opt.rnn_size + 3*3*opt.rnn_size
-  local gru_params_2 = 3*(opt.input_encoding_size + opt.rnn_size * 2 )*opt.rnn_size + 3*3*opt.rnn_size
+
+  local gru_params_2 = 3*2*opt.input_encoding_size*opt.input_encoding_size+ 3*2*opt.input_encoding_size
 
   local output_params = opt.rnn_size * (opt.vocab_size + 1) + opt.vocab_size+1
   local table_params = (opt.vocab_size + 1) * opt.input_encoding_size * 2
+
+  local p,g = lm.core_img:getParameters()
+  print({gru_params_2, p:nElement()})
 
   local expected_params = gru_params_1 + gru_params_2 * 1 + output_params + table_params
   print('expected:', expected_params)

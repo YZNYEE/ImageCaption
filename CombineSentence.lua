@@ -15,7 +15,7 @@ function layer:__init(opt)
 	self.seq_length = utils.getopt(opt, 'seq_length', 16)
 	self.batch_size = utils.getopt(opt, 'batch_size', nil)
 	assert(self.vocab_size ~= nil,'vocab_size error')
-	self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.encoding_size)
+	-- self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.encoding_size)
 	-- self:initialWeight()
 	-- print(self.lookup_table)
 
@@ -38,12 +38,11 @@ function layer:initialWeight()
 
 end
 
--- inputs is DxN LongTensor. D is batch_size. N is the length
+-- inputs is DxNxE LongTensor. D is batch_size. N is the length
 function layer:updateOutput(inputs)
 
 	self.batch_size = inputs:size(1)
 	self.size = inputs:size()
-	self.output = nil
 
 	self.inputs = self.lookup_table:forward(inputs)
 	self.output = torch.FloatTensor(self.batch_size, self.encoding_size):zero():type(self._type)
@@ -61,13 +60,13 @@ end
 function layer:updateGradInput(inputs, gradOutput)
 
 	self.batch_size = inputs:size(1)
+	self.size = inputs:size()
 
 	local gout = gradOutput:div(self.size[2])
-	local dlookup_table = torch.FloatTensor(self.batch_size, self.seq_length, self.encoding_size):zero():type(self._type)
-	for j = 1,self.batch_size do dlookup_table[j] = torch.expand(gout[j]:resize(1, self.encoding_size), self.seq_length, self.encoding_size) end
-	self.lookup_table:backward(inputs, dlookup_table)
+	local dlookup_table = torch.FloatTensor(self.batch_size, self.size[2], self.encoding_size):zero():type(self._type)
+	for j = 1,self.batch_size do dlookup_table[j] = torch.expand(gout[j]:resize(1, self.encoding_size), self.size[2], self.encoding_size) end
 
-	return torch.Tensor()
+	return dlookup_table
 
 end
 
