@@ -15,7 +15,7 @@ function layer:__init(opt)
 	self.seq_length = utils.getopt(opt, 'seq_length', 16)
 	self.batch_size = utils.getopt(opt, 'batch_size', nil)
 	assert(self.vocab_size ~= nil,'vocab_size error')
-	-- self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.encoding_size)
+	self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.encoding_size)
 	-- self:initialWeight()
 	-- print(self.lookup_table)
 

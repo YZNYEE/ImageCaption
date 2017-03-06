@@ -1,9 +1,7 @@
 require 'nn'
 local utils = require 'misc.utils'
 local net_utils = require 'misc.net_utils'
-local MLGRU = require 'MultiLayerGRU'
-require 'ConstructAttention'
-require 'CombineSentence'
+local LSTM = require 'misc.LSTM'
 
 -------------------------------------------------------------------------------
 -- Language Model core
@@ -14,37 +12,31 @@ function layer:__init(opt)
   parent.__init(self)
 
   -- options for core network
-  self.batch_size = utils.getopt(opt, 'batch_size')
   self.vocab_size = utils.getopt(opt, 'vocab_size') -- required
-  self.input_encoding_size = utils.getopt(opt, 'encoding_size')
-  self.encoding_size = utils.getopt(opt, 'encoding_size')
+  self.input_encoding_size = utils.getopt(opt, 'input_encoding_size')
   self.rnn_size = utils.getopt(opt, 'rnn_size')
-  self.num_layers = utils.getopt(opt, 'num_layers', 2)
-  self.local_img_num = utils.getopt(opt, 'local_img_num', 196)
-  self.get_top_num = utils.getopt(opt, 'get_top_num', 5)
-  self.num_of_local_img = utils.getopt(opt, 'num_of_local_img', 2)
+  self.num_layers = utils.getopt(opt, 'num_layers', 1)
   local dropout = utils.getopt(opt, 'dropout', 0)
   -- options for Language Model
   self.seq_length = utils.getopt(opt, 'seq_length')
+  --START和END是同一向量
   -- create the core lstm network. note +1 for both the START and END tokens
-
-  self.constructAtt_ls = nn.ConstructAttention(opt, 'local')
-  self.constructAtt_o = nn.ConstructAttention(opt, 'overall')
-  self.combineSen = nn.SenInfo(opt)
-  self.core = MLGRU.mlgru(self.input_encoding_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
+  self.core = LSTM.lstm(self.input_encoding1_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
+  --lookuptable在torch中也是继承于nn.modules()，因此下面这句代码也是相当与构建一个vocab_size+1到input_encoding_size的过程，相当于一个encode过程
   self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.input_encoding_size)
-
   self:_createInitState(1) -- will be lazily resized later during forward passes
-
 end
 
 function layer:_createInitState(batch_size)
   assert(batch_size ~= nil, 'batch size must be provided')
   -- construct the initial state for the LSTM
   if not self.init_state then self.init_state = {} end -- lazy init
-  for h=1,self.num_layers do
+  for h=1,self.num_layers*2 do
     -- note, the init state Must be zeros because we are using init_state to init grads in backward call too
-    if self.init_state[h] then
+    -- 注意这里的num_layers*2应该是与prev_c和prev_h相对应
+	-- 检查各初始状态是否符合batch_size，若不符合则将其转换成batch_size的尺寸
+	-- 这里是将prev_c和prev_h分开存放的
+	if self.init_state[h] then
       if self.init_state[h]:size(1) ~= batch_size then
         self.init_state[h]:resize(batch_size, self.rnn_size):zero() -- expand the memory
       end
@@ -52,42 +44,42 @@ function layer:_createInitState(batch_size)
       self.init_state[h] = torch.zeros(batch_size, self.rnn_size)
     end
   end
+  --设定状态的大小
+  --这num_state的大小为num_layers*2
   self.num_state = #self.init_state
 end
 
 function layer:createClones()
   -- construct the net clones
   print('constructing clones inside the LanguageModel')
+  --将网络的核心部分clone
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
-  self.combineSens = {}
-  for t=2,self.seq_length+1 do
+  for t=2,self.seq_length+2 do
+  --If arguments are provided to the clone(...) function it also calls share(...) with those arguments on the cloned module after creating it,
+  --hence making a deep copy of this module with some shared parameters.所以这里的clones[t]中的参数都是共享的
+  --node这里的clones的长度为seq_length+2，第一个输入向量为图片向量，第二向量才是start向量
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
-	self.combineSens[t] = self.combineSen:clone('weight','gradWeight')
   end
 end
 
 function layer:getModulesList()
-	local g={self.core, self.lookup_table, self.combineSen.lookup_table}
-	return g
+  return {self.core, self.lookup_table}
 end
 
 function layer:parameters()
   -- we only have two internal modules, return their params
   local p1,g1 = self.core:parameters()
   local p2,g2 = self.lookup_table:parameters()
-  local p3,g3 = self.combineSen:parameters()
 
   local params = {}
   for k,v in pairs(p1) do table.insert(params, v) end
   for k,v in pairs(p2) do table.insert(params, v) end
-  for k,v in pairs(p3) do table.insert(params, v) end
 
   local grad_params = {}
   for k,v in pairs(g1) do table.insert(grad_params, v) end
   for k,v in pairs(g2) do table.insert(grad_params, v) end
-  for k,v in pairs(g3) do table.insert(grad_params, v) end
 
   -- todo: invalidate self.clones if params were requested?
   -- what if someone outside of us decided to call getParameters() or something?
@@ -100,14 +92,12 @@ function layer:training()
   if self.clones == nil then self:createClones() end -- create these lazily if needed
   for k,v in pairs(self.clones) do v:training() end
   for k,v in pairs(self.lookup_tables) do v:training() end
-  for k,v in pairs(self.combineSens) do v.lookup_table:training() end
 end
 
 function layer:evaluate()
   if self.clones == nil then self:createClones() end -- create these lazily if needed
   for k,v in pairs(self.clones) do v:evaluate() end
   for k,v in pairs(self.lookup_tables) do v:evaluate() end
-  for k,v in pairs(self.combineSens) do v.lookup_table:evaluate() end
 end
 
 --[[
@@ -116,34 +106,28 @@ Careful: make sure model is in :evaluate() mode if you're calling this.
 Returns: a DxN LongTensor with integer elements 1..M,
 where D is sequence length and N is batch (so columns are sequences)
 --]]
--- imgs:{DX196X512,DX196X512,DX512}
 function layer:sample(imgs, opt)
   local sample_max = utils.getopt(opt, 'sample_max', 1)
   local beam_size = utils.getopt(opt, 'beam_size', 1)
   local temperature = utils.getopt(opt, 'temperature', 1.0)
   if sample_max == 1 and beam_size > 1 then return self:sample_beam(imgs, opt) end -- indirection for beam search
 
-  assert( #imgs == self.num_of_local_img+1, 'no accordance')
-
-
-  local batch_size = imgs[#imgs]:size(1)
-  self.batch_size = batch_size
+  local batch_size = imgs:size(1)
   self:_createInitState(batch_size)
+  --state中储存的是preV_c和prev_h
   local state = self.init_state
 
   -- we will write output predictions into tensor seq
   local seq = torch.LongTensor(self.seq_length, batch_size):zero()
   local seqLogprobs = torch.FloatTensor(self.seq_length, batch_size)
   local logprobs -- logprobs predicted in last time step
-  -- A
-  local subseq = torch.LongTensor(self.seq_length + 1, batch_size):zero()
-  -- A
-  for t=1,self.seq_length+1 do
+  for t=1,self.seq_length+2 do
 
     local xt, it, sampleLogprobs
-	if t == 1 then
-	  xt = imgs[self.num_of_local_img+1]
-    elseif t == 1 then
+    if t == 1 then
+      -- feed in the images
+      xt = imgs
+    elseif t == 2 then
       -- feed in the start tokens
       it = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       xt = self.lookup_table:forward(it)
@@ -151,9 +135,12 @@ function layer:sample(imgs, opt)
       -- take predictions from previous time step and feed them in
       if sample_max == 1 then
         -- use argmax "sampling"
+		--取得predictions的最大的值，作为预测值
+		--sampleLogprobs暂时不知道
         sampleLogprobs, it = torch.max(logprobs, 2)
         it = it:view(-1):long()
       else
+	    --这块是真的不清楚
         -- sample from the distribution of previous predictions
         local prob_prev
         if temperature == 1.0 then
@@ -169,42 +156,19 @@ function layer:sample(imgs, opt)
       xt = self.lookup_table:forward(it)
     end
 
-    if t >= 2 then
-      seq[t-1] = it -- record the samples
-      seqLogprobs[t-1] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
-	end
+    if t >= 3 then
+      seq[t-2] = it -- record the samples
+      seqLogprobs[t-2] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
+    end
 
-	subseq[t] = it
-
-	local imgFeature = {}
-
-	if t > 1 then
-		local combineS = self.combineSen:forward(subseq:sub(1,t-1):t())
-		for i=1,self.num_of_local_img do
-			imgFeature[i] = self.constructAtt_ls:forward({imgs[i], combineS})
-		end
-		imgFeature[self.num_of_local_img+1] = self.constructAtt_o:forward({imgs[self.num_of_local_img+1], combineS})
-		-- assert( #state == 3,'num_layers is not accordance with expectation')
-	else
-		for i=1,self.num_of_local_img do
-			imgFeature[i] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-		end
-		imgFeature[self.num_of_local_img+1] = imgs[self.num_of_local_img+1]
-	end
-
-	-- assert( #state == 3,'num_layers is not accordance with expectation')
-
-    inputs = {xt}
-	for i=1,self.num_of_local_img+1 do
-		table.insert(inputs, state[i])
-		table.insert(inputs, imgFeature[i])
-	end
-
+    local inputs = {xt,unpack(state)}
     local out = self.core:forward(inputs)
+	--这是LSTM最后一层，已经经过softmax
+	--取预测值
     logprobs = out[self.num_state+1] -- last element is the output vector
+	--将每层的值存state中
     state = {}
     for i=1,self.num_state do table.insert(state, out[i]) end
-
   end
 
   -- return the samples and their log likelihoods
@@ -217,9 +181,12 @@ Not 100% sure it's correct, and hard to fully unit test to satisfaction, but
 it seems to work, doesn't crash, gives expected looking outputs, and seems to
 improve performance, so I am declaring this correct.
 ]]--
+
+--beam search启发式搜索，先忽略以后若能弄懂，在分析
+
 function layer:sample_beam(imgs, opt)
   local beam_size = utils.getopt(opt, 'beam_size', 10)
-  local batch_size, feat_dim = imgs[3]:size(1), imgs[3]:size(2)
+  local batch_size, feat_dim = imgs:size(1), imgs:size(2)
   local function compare(a,b) return a.p > b.p end -- used downstream
 
   assert(beam_size <= self.vocab_size+1, 'lets assume this for now, otherwise this corner case causes a few headaches down the road. can be dealt with in future if needed')
@@ -227,12 +194,6 @@ function layer:sample_beam(imgs, opt)
   local seq = torch.LongTensor(self.seq_length, batch_size):zero()
   local seqLogprobs = torch.FloatTensor(self.seq_length, batch_size)
   -- lets process every image independently for now, for simplicity
-
-  self.constructAtt_l1:changeBatchsize(beam_size)
-  self.constructAtt_l2:changeBatchsize(beam_size)
-  self.constructAtt_o:changeBatchsize(beam_size)
-  self.combineSen:changeBatchsize(beam_size)
-
   for k=1,batch_size do
 
     -- create initial states for all beams
@@ -245,17 +206,15 @@ function layer:sample_beam(imgs, opt)
     local beam_logprobs_sum = torch.zeros(beam_size) -- running sum of logprobs for each beam
     local logprobs -- logprobs predicted in last time step, shape (beam_size, vocab_size+1)
     local done_beams = {}
-    local subseq = torch.LongTensor(self.seq_length+1, beam_size):zero()
-
-	local l_1_k = l_1[{{k,k}}]:expand(beam_size, l_1:size(2), l_1:size(3))
-	local l_2_k = l_2[{{k,k}}]:expand(beam_size, l_2:size(2), l_2:size(3))
-	local overall_k = overall[{{k,k}}]:expand(beam_size, feat_dim)
-
-	for t=1,self.seq_length+1 do
+    for t=1,self.seq_length+2 do
 
       local xt, it, sampleLogprobs
       local new_state
       if t == 1 then
+        -- feed in the images
+        local imgk = imgs[{ {k,k} }]:expand(beam_size, feat_dim) -- k'th image feature expanded out
+        xt = imgk
+      elseif t == 2 then
         -- feed in the start tokens
         it = torch.LongTensor(beam_size):fill(self.vocab_size+1)
         xt = self.lookup_table:forward(it)
@@ -271,7 +230,7 @@ function layer:sample_beam(imgs, opt)
         local candidates = {}
         local cols = math.min(beam_size,ys:size(2))
         local rows = beam_size
-        if t == 2 then rows = 1 end -- at first time step only the first beam is active
+        if t == 3 then rows = 1 end -- at first time step only the first beam is active
         for c=1,cols do -- for each column (word, essentially)
           for q=1,rows do -- for each beam expansion
             -- compute logprob of expanding beam q with word in (sorted) position c
@@ -285,17 +244,17 @@ function layer:sample_beam(imgs, opt)
         -- construct new beams
         new_state = net_utils.clone_list(state)
         local beam_seq_prev, beam_seq_logprobs_prev
-        if t > 2 then
+        if t > 3 then
           -- well need these as reference when we fork beams around
-          beam_seq_prev = beam_seq[{ {1,t-2}, {} }]:clone()
-          beam_seq_logprobs_prev = beam_seq_logprobs[{ {1,t-2}, {} }]:clone()
+          beam_seq_prev = beam_seq[{ {1,t-3}, {} }]:clone()
+          beam_seq_logprobs_prev = beam_seq_logprobs[{ {1,t-3}, {} }]:clone()
         end
         for vix=1,beam_size do
           local v = candidates[vix]
           -- fork beam index q into index vix
-          if t > 2 then
-            beam_seq[{ {1,t-2}, vix }] = beam_seq_prev[{ {}, v.q }]
-            beam_seq_logprobs[{ {1,t-2}, vix }] = beam_seq_logprobs_prev[{ {}, v.q }]
+          if t > 3 then
+            beam_seq[{ {1,t-3}, vix }] = beam_seq_prev[{ {}, v.q }]
+            beam_seq_logprobs[{ {1,t-3}, vix }] = beam_seq_logprobs_prev[{ {}, v.q }]
           end
           -- rearrange recurrent states
           for state_ix = 1,#new_state do
@@ -303,11 +262,11 @@ function layer:sample_beam(imgs, opt)
             new_state[state_ix][vix] = state[state_ix][v.q]
           end
           -- append new end terminal at the end of this beam
-          beam_seq[{ t-1, vix }] = v.c -- c'th word is the continuation
-          beam_seq_logprobs[{ t-1, vix }] = v.r -- the raw logprob here
+          beam_seq[{ t-2, vix }] = v.c -- c'th word is the continuation
+          beam_seq_logprobs[{ t-2, vix }] = v.r -- the raw logprob here
           beam_logprobs_sum[vix] = v.p -- the new (sum) logprob along this beam
 
-          if v.c == self.vocab_size+1 or t == self.seq_length+1 then
+          if v.c == self.vocab_size+1 or t == self.seq_length+2 then
             -- END token special case here, or we reached the end.
             -- add the beam to a set of done beams
             table.insert(done_beams, {seq = beam_seq[{ {}, vix }]:clone(),
@@ -318,36 +277,13 @@ function layer:sample_beam(imgs, opt)
         end
 
         -- encode as vectors
-        it = beam_seq[t-1]
+        it = beam_seq[t-2]
         xt = self.lookup_table:forward(it)
       end
 
       if new_state then state = new_state end -- swap rnn state, if we reassinged beams
 
-	  subseq[t] = it
-
-	  local imgFeature = {}
-
-	  if t > 1 then
-		local combineS = self.combineSen:forward(subseq:sub(1,t-1):t())
-		imgFeature[1] = self.constructAtt_l1:forward({l_1_k, combineS})
-		imgFeature[2] = self.constructAtt_l2:forward({l_2_k, combineS})
-		imgFeature[3] = self.constructAtt_o:forward({overall_k, combineS})
-		assert( #state == 3,'num_layers is not accordance with expectation')
-	  else
-		imgFeature[1] = torch.FloatTensor(beam_size, self.input_encoding_size):zero():type(self._type)
-		imgFeature[2] = torch.FloatTensor(beam_size, self.input_encoding_size):zero():type(self._type)
-		imgFeature[3] = overall_k
-	  end
-
-	  assert( #state == 3,'num_layers is not accordance with expectation')
-
-	  inputs = {xt}
-	  for i=1,3 do
-		table.insert(inputs, state[i])
-		table.insert(inputs, imgFeature[i])
-	  end
-
+      local inputs = {xt,unpack(state)}
       local out = self.core:forward(inputs)
       logprobs = out[self.num_state+1] -- last element is the output vector
       state = {}
@@ -369,18 +305,21 @@ input is a tuple of:
 2. torch.LongTensor of size DxN, elements 1..M
    where M = opt.vocab_size and D = opt.seq_length
 
-returns a (D+1)xNx(M+1) Tensor giving (normalized) log probabilities for the
+returns a (D+2)xNx(M+1) Tensor giving (normalized) log probabilities for the
 next token at every iteration of the LSTM (+2 because +1 for first dummy
 img forward, and another +1 because of START/END tokens shift)
 --]]
+-- N是batch_size
+-- 注意在这里训练的过程中输入的向量为确定的，正确的label
 function layer:updateOutput(input)
-
-  local seq = input[#input]
+  --这时input已经转换为encoding_size的向量
+  local imgs = input[1]
+  local seq = input[2]
   if self.clones == nil then self:createClones() end -- lazily create clones on first forward pass
 
   assert(seq:size(1) == self.seq_length)
   local batch_size = seq:size(2)
-  self.output:resize(self.seq_length+1, batch_size, self.vocab_size+1)
+  self.output:resize(self.seq_length+2, batch_size, self.vocab_size+1)
 
   self:_createInitState(batch_size)
 
@@ -388,25 +327,22 @@ function layer:updateOutput(input)
   self.inputs = {}
   self.lookup_tables_inputs = {}
   self.tmax = 0 -- we will keep track of max sequence length encountered in the data for efficiency
-
-  self.subseq = torch.LongTensor(self.seq_length+1, batch_size)
-  self.subseq:sub(2,self.seq_length+1, 1,batch_size):copy(seq)
-  self.subseq:sub(1,1):fill(self.vocab_size+1)
-  self.combineS = {}
-  self.batch_size = batch_size
-
-  for t=1,self.seq_length+1 do
+  for t=1,self.seq_length+2 do
 
     local can_skip = false
     local xt
     if t == 1 then
+      -- feed in the images
+      xt = imgs -- NxK sized input
+    elseif t == 2 then
       -- feed in the start tokens
       local it = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       self.lookup_tables_inputs[t] = it
       xt = self.lookup_tables[t]:forward(it) -- NxK sized input (token embedding vectors)
     else
       -- feed in the rest of the sequence...
-      local it = seq[t-1]:clone()
+	  --
+      local it = seq[t-2]:clone()
       if torch.sum(it) == 0 then
         -- computational shortcut for efficiency. All sequences have already terminated and only
         -- contain null tokens from here on. We can skip the rest of the forward pass and save time
@@ -427,37 +363,12 @@ function layer:updateOutput(input)
       end
     end
 
-	if not can_skip then
+    if not can_skip then
       -- construct the inputs
-
-	  local imgFeature = {}
-
-	  if t > 1 then
-		local comseq = self.subseq:sub(1,t-1):t()
-		comseq[torch.eq(comseq, 0)] = 1
-		self.combineS[t] = self.combineSens[t]:forward(comseq)
-		for i=1,self.num_of_local_img do
-			-- print({input[i], self.combineS[t]})
-			imgFeature[i] = self.constructAtt_ls:forward({input[i], self.combineS[t]})
-		end
-		imgFeature[self.num_of_local_img+1] = self.constructAtt_o:forward({input[self.num_of_local_img+1], self.combineS[t]})
-		-- assert( #state == 3,'num_layers is not accordance with expectation')
-	  else
-		for i=1,self.num_of_local_img do
-			imgFeature[i] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-		end
-		imgFeature[self.num_of_local_img+1] = input[self.num_of_local_img+1]
-	  end
-
-
-	  self.inputs[t] = {xt}
-	  for i=1,self.num_of_local_img+1 do
-		  table.insert(self.inputs[t], self.state[t-1][i])
-		  table.insert(self.inputs[t], imgFeature[i])
-	  end
-
-
-	  local out = self.clones[t]:forward(self.inputs[t])
+	  --符合LSTM格式运算
+      self.inputs[t] = {xt,unpack(self.state[t-1])}
+      -- forward the network
+      local out = self.clones[t]:forward(self.inputs[t])
       -- process the outputs
       self.output[t] = out[self.num_state+1] -- last element is the output vector
       self.state[t] = {} -- the rest is state
@@ -469,71 +380,41 @@ function layer:updateOutput(input)
   return self.output
 end
 
+--D是seq_length，M是vocal_size，N为batchsize
 --[[
-gradOutput is an (D+1)xNx(M+1) Tensor.
+gradOutput is an (D+2)xNx(M+1) Tensor.
 --]]
 function layer:updateGradInput(input, gradOutput)
   local dimgs -- grad on input images
-
   -- go backwards and lets compute gradients
   local dstate = {[self.tmax] = self.init_state} -- this works when init_state is all zeros
-  local dimg_local1, dimg_local2, doverall
-  local dgls = {}
+  --注意这里self.tmax的最大值为seq_length+2
   for t=self.tmax,1,-1 do
     -- concat state gradients and output vector gradients at time step t
     local dout = {}
+	--注意这里的gradoutput形式，它与模型输出相对应，可以将其看作是并行训练，不是逐层
     for k=1,#dstate[t] do table.insert(dout, dstate[t][k]) end
-    table.insert(dout, gradOutput[t])
+    table.insert(dout,gradOutput[t])
+	--这里dout类型为tabel，why
+	-- 蠢了这里的self.clones[t]的类型为table，而且是从新创建的dout
     local dinputs = self.clones[t]:backward(self.inputs[t], dout)
     -- split the gradient to xt and to state
-    -- assert( #dinputs == 7)
-	local dxt = dinputs[1] -- first element is the input vector
+    local dxt = dinputs[1] -- first element is the input vector
     dstate[t-1] = {} -- copy over rest to state grad
-
-	for k=1,self.num_of_local_img+1 do
-		table.insert(dstate[t-1], dinputs[k*2])
-	end
+    for k=2,self.num_state+1 do table.insert(dstate[t-1], dinputs[k]) end
 
     -- continue backprop of xt
-	local it = self.lookup_tables_inputs[t]
-	self.lookup_tables[t]:backward(it, dxt) -- backprop into lookup table
-
-	-- print({self.tmax, t})
-
-	local dsen = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-
-	local dgl = {}
-
-	-- print(dinputs[1])
-
-	if t > 1 then
-		for i=1,self.num_of_local_img do
-			local dg = self.constructAtt_ls:backward({input[i], self.combineS[t]}, dinputs[2*i+1])
-			dgl[i] = dg[1]
-			dsen:add(dg[2])
-		end
-		local dg = self.constructAtt_o:backward({input[self.num_of_local_img+1], self.combineS[t]}, dinputs[2*self.num_of_local_img+3])
-		dgl[self.num_of_local_img+1] = dg[1]
-		dsen:add(dg[2])
-		self.combineSens[t]:backward(self.subseq:sub(1,t-1):t(), dsen)
-	end
-
-
-	if t == self.tmax then
-		for i=1,self.num_of_local_img+1 do dgls[i] = dgl[i]:clone() end
-	elseif t > 1 then
-		for i=1,self.num_of_local_img+1 do dgls[i]:add(dgl[i]) end
-	else
-		dgls[self.num_of_local_img+1]:add(dinputs[self.num_of_local_img*2+3])
-	end
-
+    if t == 1 then
+      dimgs = dxt
+    else
+      local it = self.lookup_tables_inputs[t]
+      self.lookup_tables[t]:backward(it, dxt) -- backprop into lookup table
+    end
   end
 
   -- we have gradient on image, but for LongTensor gt sequence we only create an empty tensor - can't backprop
-  self.gradInput = {}
-
-  for i=1,self.num_of_local_img+1 do table.insert(self.gradInput, dgls[i]) end
-  table.insert(self.gradInput, torch.Tensor())
+  -- 这里只输出图片接口的梯度
+  self.gradInput = {dimgs, torch.Tensor()}
   return self.gradInput
 end
 
@@ -547,7 +428,7 @@ function crit:__init()
 end
 
 --[[
-input is a Tensor of size (D+1)xNx(M+1)
+input is a Tensor of size (D+2)xNx(M+1)
 seq is a LongTensor of size DxN. The way we infer the target
 in this criterion is as follows:
 - at first time step the output is ignored (loss = 0). It's the image tick
@@ -556,35 +437,38 @@ in this criterion is as follows:
 The criterion must be able to accomodate variably-sized sequences by making sure
 the gradients are properly set to zeros where appropriate.
 --]]
+--这里的seq中的值为词的索引
 function crit:updateOutput(input, seq)
   self.gradInput:resizeAs(input):zero() -- reset to zeros
   local L,N,Mp1 = input:size(1), input:size(2), input:size(3)
   local D = seq:size(1)
-  assert(D == L-1, 'input Tensor should be 1 larger in time')
+  assert(D == L-2, 'input Tensor should be 2 larger in time')
 
   local loss = 0
   local n = 0
   for b=1,N do -- iterate over batches
     local first_time = true
-    for t=1,L do -- iterate over sequence time (ignore t=1, dummy forward for the image)
+    for t=2,L do -- iterate over sequence time (ignore t=1, dummy forward for the image)
 
       -- fetch the index of the next token in the sequence
       local target_index
-      if t > D then -- we are out of bounds of the index sequence: pad with null tokens
+      if t-1 > D then -- we are out of bounds of the index sequence: pad with null tokens
         target_index = 0
       else
-        target_index = seq[{t,b}] -- t is correct, since at t=1 START::::token was fed in and we want to predict first word (and 2-1 = 1).
+        target_index = seq[{t-1,b}] -- t-1 is correct, since at t=2 START token was fed in and we want to predict first word (and 2-1 = 1).
       end
       -- the first time we see null token as next index, actually want the model to predict the END token
-	  if target_index == 0 and first_time then
-		target_index = Mp1
+      if target_index == 0 and first_time then
+        target_index = Mp1
         first_time = false
       end
 
       -- if there is a non-null next token, enforce loss!
       if target_index ~= 0 then
         -- accumulate loss
+		--查看input[{t,b,target_index}]的值
         loss = loss - input[{ t,b,target_index }] -- log(p)
+		--为-1是因为肯定小于目标值所以上升，其他不管
         self.gradInput[{ t,b,target_index }] = -1
         n = n + 1
       end
@@ -593,7 +477,6 @@ function crit:updateOutput(input, seq)
   end
   self.output = loss / n -- normalize by number of predictions that were made
   self.gradInput:div(n)
-  -- print(self.gradInput)
   return self.output
 end
 

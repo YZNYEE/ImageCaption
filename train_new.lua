@@ -217,6 +217,10 @@ local function eval_split(split, evalopt)
 
   --protos.cnn:evaluate()
   protos.lm:evaluate()
+  for k,v in pairs(protos.cnn_part) do
+	v:evaluate()
+  end
+
   loader:resetIterator(split) -- rewind iteator back to first datapoint in the split
   local n = 0
   local loss_sum = 0
@@ -280,6 +284,14 @@ local iter = 0
 local function lossFun()
   -- protos.cnn:training()
   protos.lm:training()
+  --print(protos.cnn_part:type())
+  for i=1,40 do
+	--print('i: '..i)
+	--print(protos.cnn_part[i])
+	protos.cnn_part[i]:training()
+  end
+
+
   grad_params:zero()
   if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
     cnn_grad_params:zero()
@@ -393,7 +405,8 @@ while true do
       if iter > 0 then -- dont save on very first iteration
         -- include the protos (which have weights) and save to file
         local save_protos = {}
-        save_protos.lm = thin_lm -- these are shared clones, and point to correct param storage
+        print('best_score : '..best_score)
+		save_protos.lm = thin_lm -- these are shared clones, and point to correct param storage
         save_protos.cnn_part = thin_cnn_part
 
         checkpoint.protos = save_protos
