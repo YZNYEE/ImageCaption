@@ -109,7 +109,7 @@ if string.len(opt.start_from) > 0 then
   local am_modules = protos.am:getModulesList()
   for k,v in pairs(am_modules) do net_utils.unsanitize_gradients(v) end
   opt.seq_length = loader:getSeqLength()
-  protos.crit = nn.AttentionCriterion(opt) -- not in checkpoints, create manually
+  protos.crit = nn.AttDisCriterion(opt) -- not in checkpoints, create manually
 
   local cnn_backend = opt.backend
   if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
@@ -146,7 +146,7 @@ else
   protos.cnn_part = cnn_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
 
   -- criterion for the language model
-  protos.crit = nn.AttentionCriterion(amOpt)
+  protos.crit = nn.AttDisCriterion(amOpt)
 end
 
 if opt.gpuid >= 0 then
@@ -231,7 +231,7 @@ local function eval_split(split, evalopt)
 		local input = {unpack(expanded_feats)}
 		table.insert(input, texseq:sub(1,opt.batch_size * opt.seq_per_img,1,i))
 		local logprobs = protos.am:forward(input)
-		local loss = protos.crit:forward(logprobs[2], seq:sub(1,i))
+		local loss = protos.crit:forward({logprobs[2], i}, seq)
 		loss_it = loss_it + loss
 		loss_evals = loss_evals + 1
 
@@ -292,13 +292,13 @@ local function lossFun()
 	local input = {unpack(expanded_feats)}
 	table.insert(input, texseq:sub(1,opt.batch_size * opt.seq_per_img,1,i))
 	local logprobs = protos.am:forward(input)
-	local loss = protos.crit:forward(logprobs[2], seq:sub(1,i))
+	local loss = protos.crit:forward({logprobs[2], i}, seq)
 	losssum = losssum + loss
 	-----------------------------------------------------------------------------
 	-- Backward pass
 	-----------------------------------------------------------------------------
 	-- backprop criterion
-	local dlogprobs = protos.crit:backward(logprobs[2], seq:sub(1,i))
+	local dlogprobs = protos.crit:backward({logprobs[2], i}, seq)
 	-- backprop language model
 	local dgrad= protos.am:backward(input, {empty, dlogprobs})
 	-- backprop the CNN, but only if we are finetuning

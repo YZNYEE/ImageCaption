@@ -247,7 +247,7 @@ local function checkgrad()
 	opt.get_top_num = 1
 
 	local am = nn.AttentionModel(opt)
-    local crit = nn.AttentionCriterion(opt)
+    local crit = nn.AttDisCriterion(opt)
 
     -- construct some input to feed in
     local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
@@ -263,16 +263,16 @@ local function checkgrad()
 	exseq[1]:fill(opt.vocab_size+1)
 	exseq[torch.eq(exseq,0)] = 1
 
-	--local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size):fill(0)
+	local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
 
 	--print(exseq)
 	--print(seq)
 
     local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.encoding_size):type(dtype)
     local img_o = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
-	local sentence = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+	--local sentence = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
 
-	local true_target = torch.LongTensor(opt.batch_size):zero()
+	--local true_target = torch.LongTensor(opt.batch_size):zero()
 	for i=1,opt.seq_length do
 
 		print(' testing '..i..'th seq')
@@ -283,10 +283,10 @@ local function checkgrad()
 
 		-- crit module will change target's value, so save target is must in the gradcheck
 		local target = true_target
-		local loss = crit:forward(output[2], seq:sub(1,i))
-		true_target = crit.target:clone()
+		local loss = crit:forward({output[2], i}, seq)
+		-- true_target = crit.target:clone()
 
-		local gradOutput = crit:backward(output[2], seq:sub(1,i))
+		local gradOutput = crit:backward({output[2], i}, seq)
 		-- print(gradOutput[1])
 
 		local gradInput = am:backward(input, {torch.zeros(opt.batch_size, opt.rnn_size), gradOutput})
@@ -294,10 +294,10 @@ local function checkgrad()
 
 		local function f(x)
 
-			crit.target:copy(target)
+			--crit.target:copy(target)
 			local input = {img_o, x, exseq:sub(1,i):t()}
 			local output = am:forward(input)
-			local loss = crit:forward(output[2], seq:sub(1,i))
+			local loss = crit:forward({output[2], i}, seq)
 			return loss
 
 		end
@@ -308,10 +308,10 @@ local function checkgrad()
 
 		local function f1(x)
 
-			crit.target:copy(target)
+			--crit.target:copy(target)
 			local input = {x, img_l1, exseq:sub(1,i):t()}
 			local output = am:forward(input)
-			local loss = crit:forward(output[2], seq:sub(1,i))
+			local loss = crit:forward({output[2], i}, seq)
 			return loss
 
 		end
@@ -340,6 +340,42 @@ local function checkgrad()
 
 end
 
+local function checkgrad_crit()
+
+	local opt = {}
+	opt.batch_size = 5
+	opt.vocab_size = 6
+	opt.seq_length = 8
+
+	local crit_dis = nn.AttDisCriterion()
+	local input = torch.randn(opt.batch_size, opt.vocab_size+1)
+	local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
+	seq[{{3,4},1}]=0
+	seq[{{3,6},3}]=0
+	local a = 1
+
+	--print(seq)
+
+	local loss = crit_dis:forward({input, a}, seq)
+	local gradInput = crit_dis:backward({input, a}, seq)
+
+	--print(input)
+	--print(gradInput)
+
+	local function f(x)
+
+		local loss = crit_dis:forward({input, a}, seq)
+		return loss
+
+	end
+
+	local gradInput_num = gradcheck.numeric_gradient(f, input, 1, 1e-6)
+	tester:assertTensorEq(gradInput, gradInput_num, 1e-4)
+	tester:assertlt(gradcheck.relative_error(gradInput, gradInput_num, 1e-8), 1e-4)
+
+
+end
+
 local function overfit()
 
 	local dtype = 'torch.DoubleTensor'
@@ -354,7 +390,7 @@ local function overfit()
 	opt.get_top_num = 1
 
 	local am = nn.AttentionModel(opt)
-    local crit = nn.AttentionCriterion(opt)
+    local crit = nn.AttDisCriterion(opt)
 
     -- construct some input to feed in
     local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
@@ -364,7 +400,6 @@ local function overfit()
 
 	local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.encoding_size):type(dtype)
     local img_o = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
-	local sentence = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
 
 	local exseq = torch.LongTensor(opt.seq_length+1, opt.batch_size)
 	exseq:sub(2,opt.seq_length+1,1, opt.batch_size):copy(seq)
@@ -390,8 +425,8 @@ local function overfit()
 		for i=1,j do
 
 			local output = am:forward{img_o, img_l1, exseq:sub(1,i):t()}
-			local loss = crit:forward(output[2], seq:sub(1,i))
-			local gradOutput = crit:backward(output[2], seq:sub(1,i))
+			local loss = crit:forward({output[2], i},seq)
+			local gradOutput = crit:backward({output[2], i}, seq)
 			am:backward({img_o, img_l1, exseq:sub(1,i):t()}, {torch.zeros(opt.batch_size, opt.rnn_size), gradOutput})
 			-- print({loss,loss1,loss2})
 			losssum = losssum + loss
@@ -403,10 +438,10 @@ local function overfit()
 	local loss
 	local grad_cache = grad_params:clone():fill(1e-8)
 	print('trying to overfit the language model on toy data:')
-	for t=1,90 do
+	for t=1,30 do
 		loss = lossFun()
 		-- test that initial loss makes sense
-		if t == 1 then tester:assertlt(math.abs(math.log(opt.vocab_size+1) - loss), 0.1) end
+		--if t == 1 then tester:assertlt(math.abs(math.log(opt.vocab_size+1) - loss), 0.1) end
 		grad_cache:addcmul(1, grad_params, grad_params)
 		params:addcdiv(-1e-1, grad_params, torch.sqrt(grad_cache)) -- adagrad update
 		print(string.format('iteration %d/30: loss %f ', t, loss))
@@ -423,6 +458,7 @@ end
 --tests.gradcheckGRU = check_GRU
 tests.gradcheck = checkgrad
 tests.overfit = overfit
+tests.gradcheck_dis = checkgrad_crit
 
 tester:add(tests)
 tester:run()

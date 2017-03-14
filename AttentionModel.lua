@@ -271,3 +271,101 @@ function crit:updateGradInput(input, seq)
 	return self.gradInput
 
 end
+
+
+local crit_dis, parent = torch.class('nn.AttDisCriterion', 'nn.Criterion')
+function crit_dis:__init(opt)
+	parent.__init(self)
+end
+
+function crit_dis:reset(MP1)
+
+	if self.flag then
+		self.flag:zero()
+		self.used:zero()
+	else
+		self.flag = torch.LongTensor(MP1):zero()
+		self.used = torch.LongTensor(MP1):zero()
+	end
+
+end
+
+function getmax(a, b)
+
+	if a>b then return a
+	else return b
+	end
+
+end
+
+function crit_dis:updateOutput(inputs, seq)
+
+	local t = inputs[2]
+	local input = inputs[1]
+	local D,N,MP1 = seq:size(1), seq:size(2), input:size(2)
+	self.gradInput:resizeAs(input):zero()
+
+	local loss = 0
+	local n = 0
+	for i=1,N do
+
+		self:reset(MP1)
+
+		for j=t,D do
+
+			local target_index = seq[j][i]
+			if target_index == 0 then target_index = MP1 end
+			self.flag[target_index] = 1
+
+		end
+
+		--print(self.flag)
+
+		for j=t,D do
+
+			local target_index = seq[j][i]
+			if target_index == 0 then target_index = MP1 end
+			local flag = true
+			if self.used[target_index] == 1 then flag = false end
+
+			if flag then
+
+				-- get score of the target
+				local score = input[i][target_index]
+				self.used[target_index] = 1
+
+				-- compute every pair i,j score in ith sample
+				for x=1,MP1 do
+
+					-- if x is target_index, do nothing
+					if self.flag[x] == 0 then
+
+						local scorex = input[i][x]
+						local ls = getmax(0, 1-(score-scorex))
+						loss = loss + ls
+						n = n + 1
+						if ls ~= 0 then
+							self.gradInput[i][x] = self.gradInput[i][x] + 1
+							self.gradInput[i][target_index] = self.gradInput[i][target_index] - 1
+						end
+
+					end
+
+				end
+
+
+			end
+
+
+		end
+
+	end
+	self.output = loss/n
+	self.gradInput:div(n)
+	return self.output
+
+end
+
+function crit_dis:updateGradInput()
+	return self.gradInput
+end
