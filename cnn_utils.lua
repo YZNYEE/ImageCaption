@@ -1,6 +1,6 @@
 require 'hdf5'
 local utils = require 'misc.utils'
-DataLoader = require'misc.DataLoader'
+require'misc.DataLoader'
 local cnn_utils = {}
 
 function cnn_utils.build_cnn(cnn, opt)
@@ -61,30 +61,31 @@ function cnn_utils.cnn_check(cnn_part)
 
 end
 
-function cnn_utils.cnn_translate(givenlayer, givenpath, cnn_part)
+function cnn_utils.cnn_translate(givenlayer, givenpath, cnn_part, DataLoader)
 
 	local num = #givenlayer
 	local num_path = #givenpath
-	assert( num == #num_path, 'inconsistant')
+	assert( num == num_path, 'inconsistant')
 	assert( num ~= 0, 'givenlayer is null')
 	assert( num <= 40, 'number layer is wrong')
 
 	for i=1, num do
-		assert(num[i] <= 40, 'No of layer is beyond the bound')
+		assert(givenlayer[i] <= 40, 'No of layer is beyond the bound')
 	end
 
 	local h5_file = {}
 
 	for i=1,num do
 
-		h5_file[i] = hdf5.open(givenpath[i], 'r')
+		h5_file[i] = hdf5.open(givenpath[i], 'w')
 
 	end
 
-	for i=1,DataLoader.num_images do
+	for i=1,2 do
 
-		local data = DataLoader:getBatch(1)
-		local img = data.images:resize(img:size(2), img:size(3), img:size(4))
+		print('Translaing '..((i-1)*16+1)..'th ~ '..(i*16)..'th images')
+		local data = DataLoader:getBatch(16)
+		local img = data.images
 
 		local input = img
 		local index = 1
@@ -96,6 +97,7 @@ function cnn_utils.cnn_translate(givenlayer, givenpath, cnn_part)
 			if j == givenlayer[index]	then
 
 				index = index + 1
+				print('	Writing to '..h5_file[count])
 				h5_file[count]:write('/imgs', output)
 				count = count + 1
 
@@ -133,7 +135,20 @@ function cnn_utils.forward(cnn_part, object, img)
 		input = output
 
 	end
+	outimg = MirroPro(outimg)
 	return outimg
+
+end
+
+-- a is table
+function MirroPro(a)
+
+	local len = #a
+	local b = {}
+	for i=1,len do
+		b[i] = a[len-i+1]
+	end
+	return b
 
 end
 

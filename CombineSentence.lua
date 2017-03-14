@@ -21,6 +21,12 @@ function layer:__init(opt)
 
 end
 
+function layer:constructMidV()
+
+
+
+end
+
 function layer:createClones(length)
 
 	print('create clones inside the SenInfo')

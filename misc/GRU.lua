@@ -26,8 +26,9 @@ function GRU.gru(input_size, output_size, rnn_size, n, dropout)
   local outputs = {}
 
   for L = 1,n do
-	prev_h = inputs[L+1]
+	local prev_h = inputs[L+1]
     if L == 1 then x = inputs[1] else x = outputs[L-1] end
+	if L > 1 then if dropout > 0 then x = nn.Dropout(dropout)(x):annotate{name='drop_' .. L} end end
     if L == 1 then input_size_L = input_size else input_size_L = rnn_size end
     -- GRU tick
     -- forward the update and reset gates
@@ -44,8 +45,17 @@ function GRU.gru(input_size, output_size, rnn_size, n, dropout)
     local next_h = nn.CAddTable()({zh, zhm1})
 	table.insert(outputs, next_h)
   end
-
   return nn.gModule(inputs, outputs)
+
+end
+
+function GRU.predict(input_size, output_size, dropout)
+
+	local predict = nn.Sequential()
+	if dropout > 0 then predict:add(nn.Dropout(dropout)) end
+	predict:add(nn.Linear(input_size, output_size))
+	predict:add(nn.LogSoftMax())
+	return predict
 
 end
 

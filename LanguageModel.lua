@@ -21,7 +21,7 @@ function layer:__init(opt)
   self.seq_length = utils.getopt(opt, 'seq_length')
   --START和END是同一向量
   -- create the core lstm network. note +1 for both the START and END tokens
-  self.core = LSTM.lstm(self.input_encoding1_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
+  self.core = LSTM.lstm(self.input_encoding_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
   --lookuptable在torch中也是继承于nn.modules()，因此下面这句代码也是相当与构建一个vocab_size+1到input_encoding_size的过程，相当于一个encode过程
   self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.input_encoding_size)
   self:_createInitState(1) -- will be lazily resized later during forward passes

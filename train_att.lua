@@ -1,3 +1,4 @@
+
 require 'torch'
 require 'nn'
 require 'nngraph'
@@ -6,41 +7,40 @@ require 'loadcaffe'
 -- local imports
 local utils = require 'misc.utils'
 require 'misc.DataLoader'
-require 'LanguageModel_new'
+require 'AttentionModel'
 local net_utils = require 'misc.net_utils'
 local cnn_utils = require 'cnn_utils'
 require 'misc.optim_updates'
--- require 'misc.SpatialCrossMapLRN'
+
 
 -------------------------------------------------------------------------------
 -- Input arguments and options
 -------------------------------------------------------------------------------
+
 cmd = torch.CmdLine()
 cmd:text()
 cmd:text('Train an Image Captioning model')
 cmd:text()
 cmd:text('Options')
 
--- Data input settings
+
 cmd:option('-input_h5','coco/data.h5','path to the h5file containing the preprocessed dataset')
 cmd:option('-input_json','coco/data.json','path to the json file containing additional info and vocab')
 cmd:option('-cnn_proto','model/VGG_ILSVRC_16_layers_deploy.prototxt','path to CNN prototxt file in Caffe format. Note this MUST be a VGGNet-16 right now.')
 cmd:option('-cnn_model','model/VGG_ILSVRC_16_layers.caffemodel','path to CNN model file containing the weights, Caffe format. Note this MUST be a VGGNet-16 right now.')
 cmd:option('-start_from', '', 'path to a model checkpoint to initialize model weights from. Empty = don\'t')
 
--- Model settings
 cmd:option('-rnn_size',512,'size of the rnn in number of hidden nodes in each layer')
-cmd:option('-input_encoding_size',512,'the encoding size of each token in the vocabulary, and the image.')
+cmd:option('-encoding_size',512,'the encoding size of each token in the vocabulary, and the image.')
 
--- Optimization: General
 cmd:option('-max_iters', -1, 'max number of iterations to run for (-1 = run forever)')
-cmd:option('-batch_size',8,'what is the batch size in number of images per batch? (there will be x seq_per_img sentences)')
+cmd:option('-batch_size',16,'what is the batch size in number of images per batch? (there will be x seq_per_img sentences)')
 cmd:option('-grad_clip',0.1,'clip gradients at this value (note should be lower than usual 5 because we normalize grads by both batch and seq_length)')
 cmd:option('-drop_prob_lm', 0.5, 'strength of dropout in the Language Model RNN')
 cmd:option('-finetune_cnn_after', -1, 'After what iteration do we start finetuning the CNN? (-1 = disable; never finetune, 0 = finetune from start)')
 cmd:option('-seq_per_img',5,'number of captions to sample for each image during training. Done for efficiency since CNN forward pass is expensive. E.g. coco has 5 sents/image')
-cmd:option('-get_top_num',5,'number of local img chosen')
--- Optimization: for the Language Model
+
+-- Optimization: for the Attention Model
 cmd:option('-optim','adam','what update to use? rmsprop|sgd|sgdmom|adagrad|adam')
 cmd:option('-learning_rate',4e-4,'learning rate')
 cmd:option('-learning_rate_decay_start', -1, 'at what iteration to start decaying learning rate? (-1 = dont)')
@@ -48,6 +48,7 @@ cmd:option('-learning_rate_decay_every', 50000, 'every how many iterations there
 cmd:option('-optim_alpha',0.8,'alpha for adagrad/rmsprop/momentum/adam')
 cmd:option('-optim_beta',0.999,'beta used for adam')
 cmd:option('-optim_epsilon',1e-8,'epsilon that goes into denominator for smoothing')
+
 -- Optimization: for the CNN
 cmd:option('-cnn_optim','adam','optimization to use for CNN')
 cmd:option('-cnn_optim_alpha',0.8,'alpha for momentum of CNN')
@@ -55,8 +56,7 @@ cmd:option('-cnn_optim_beta',0.999,'alpha for momentum of CNN')
 cmd:option('-cnn_learning_rate',1e-5,'learning rate for the CNN')
 cmd:option('-cnn_weight_decay', 0, 'L2 weight decay just for the CNN')
 
--- Evaluation/Checkpointing
-cmd:option('-val_images_use', 3200, 'how many images to use when periodically evaluating the validation loss? (-1 = all)')
+cmd:option('-val_images_use', 5000, 'how many images to use when periodically evaluating the validation loss? (-1 = all)')
 cmd:option('-save_checkpoint_every', 2500, 'how often to save a model checkpoint?')
 cmd:option('-checkpoint_path', '', 'folder to save checkpoints into (empty = this folder)')
 cmd:option('-language_eval', 0, 'Evaluate language as well (1 = yes, 0 = no)? BLEU/CIDEr/METEOR/ROUGE_L? requires coco-caption code from Github.')
@@ -70,19 +70,15 @@ cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
 
 -- additional
 cmd:option('-num_of_local_img',1,'the number of local image feature')
-cmd:option('-index_of_feature',40,'table contains index of images extracted ')
-cmd:option('-num_layers',1,'the number of GRUs layers ')
+cmd:option('-index_of_feature',3040,'table contains index of images extracted ')
+cmd:option('-get_top_num',5,'number of local img chosen')
 
 cmd:text()
 
--------------------------------------------------------------------------------
--- Basic Torch initializations
--------------------------------------------------------------------------------
+
 local opt = cmd:parse(arg)
 torch.manualSeed(opt.seed)
 torch.setdefaulttensortype('torch.FloatTensor') -- for CPU
-
-assert( opt.finetune_cnn_after == -1, 'finetune_cnn is forbidden')
 
 if opt.gpuid >= 0 then
   require 'cutorch'
@@ -92,14 +88,16 @@ if opt.gpuid >= 0 then
   cutorch.setDevice(opt.gpuid + 1) -- note +1 because lua is 1-indexed
 end
 
+
 -------------------------------------------------------------------------------
 -- Create the Data Loader instance
--------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
 local loader = DataLoader{h5_file = opt.input_h5, json_file = opt.input_json}
 
 -------------------------------------------------------------------------------
 -- Initialize the networks
 -------------------------------------------------------------------------------
+
 local protos = {}
 
 if string.len(opt.start_from) > 0 then
@@ -108,55 +106,49 @@ if string.len(opt.start_from) > 0 then
   local loaded_checkpoint = torch.load(opt.start_from)
   protos = loaded_checkpoint.protos
   -- net_utils.unsanitize_gradients(protos.cnn)
-  local lm_modules = protos.lm:getModulesList()
-  for k,v in pairs(lm_modules) do net_utils.unsanitize_gradients(v) end
-  protos.crit = nn.LanguageModelCriterion() -- not in checkpoints, create manually
-  protos.expander = nn.FeatExpander(opt.seq_per_img) -- not in checkpoints, create manually
+  local am_modules = protos.am:getModulesList()
+  for k,v in pairs(am_modules) do net_utils.unsanitize_gradients(v) end
+  opt.seq_length = loader:getSeqLength()
+  protos.crit = nn.AttentionCriterion(opt) -- not in checkpoints, create manually
 
   local cnn_backend = opt.backend
   if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
   local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
-  protos.cnn_part = cnn_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
+  protos.cnn_part = cnn_utils.build_cnn(cnn_raw, {encoding_size = opt.encoding_size, backend = cnn_backend})
 
 else
   -- create protos from scratch
   -- intialize language model
-  local lmOpt = {}
-  lmOpt.vocab_size = loader:getVocabSize()
-  lmOpt.input_encoding_size = opt.input_encoding_size
-  lmOpt.encoding_size = opt.input_encoding_size
-  lmOpt.rnn_size = opt.rnn_size
-  lmOpt.num_layers = opt.num_layers
-  lmOpt.dropout = opt.drop_prob_lm
-  lmOpt.seq_length = loader:getSeqLength()
-  lmOpt.batch_size = opt.batch_size * opt.seq_per_img
+  local amOpt = {}
+  amOpt.vocab_size = loader:getVocabSize()
+  amOpt.encoding_size = opt.encoding_size
+  amOpt.rnn_size = opt.rnn_size
+  -- lmOpt.num_layers = opt.num_layers
+  amOpt.dropout = opt.drop_prob_lm
+  amOpt.seq_length = loader:getSeqLength()
+  amOpt.batch_size = opt.batch_size * opt.seq_per_img
 
-  lmOpt.get_top_num = opt.get_top_num
-  lmOpt.local_img_num = 14*14
-  lmOpt.num_of_local_img = opt.num_of_local_img
-  lmOpt.feature_table = {}
+  amOpt.get_top_num = opt.get_top_num
+  --lmOpt.local_img_num = 14*14
+  amOpt.num_of_local_img = opt.num_of_local_img
+  amOpt.feature_table = {}
 
   for i=1,string.len(opt.index_of_feature),2 do
 	  local num = string.sub(opt.index_of_feature, i, i+1)
-	  table.insert(lmOpt.feature_table, num)
+	  table.insert(amOpt.feature_table, num)
   end
 
-  protos.lm = nn.LanguageModel(lmOpt)
+  protos.am = nn.AttentionModel(amOpt)
   -- initialize the ConvNet
   local cnn_backend = opt.backend
   if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
   local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
   protos.cnn_part = cnn_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
 
-  -- initialize a special FeatExpander module that "corrects" for the batch number discrepancy
-  -- where we have multiple captions per one image in a batch. This is done for efficiency
-  -- because doing a CNN forward pass is expensive. We expand out the CNN features for each sentence
-  protos.expander = nn.FeatExpander(opt.seq_per_img)
   -- criterion for the language model
-  protos.crit = nn.LanguageModelCriterion()
+  protos.crit = nn.AttentionCriterion(amOpt)
 end
 
--- ship everything to GPU, maybe
 if opt.gpuid >= 0 then
   for k,v in pairs(protos) do
 	if v == protos.cnn_part then
@@ -177,46 +169,38 @@ for i=1,string.len(opt.index_of_feature),2 do
 end
 print(protos.feature_table)
 
-
--- flatten and prepare all model parameters to a single vector.
--- Keep CNN params separate in case we want to try to get fancy with different optims on LM/CNN
-local params, grad_params = protos.lm:getParameters()
--- local cnn_params, cnn_grad_params = protos.cnn:getParameters()
+local params, grad_params = protos.am:getParameters()
 print('total number of parameters in LM: ', params:nElement())
--- print('total number of parameters in CNN: ', cnn_params:nElement())
 assert(params:nElement() == grad_params:nElement())
--- assert(cnn_params:nElement() == cnn_grad_params:nElement())
 
--- construct thin module clones that share parameters with the actual
--- modules. These thin module will have no intermediates and will be used
--- for checkpointing to write significantly smaller checkpoint files
-local thin_lm = protos.lm:clone()
-thin_lm.core:share(protos.lm.core, 'weight', 'bias') -- TODO: we are assuming that LM has specific members! figure out clean way to get rid of, not modular.
-thin_lm.lookup_table:share(protos.lm.lookup_table, 'weight', 'bias')
-thin_lm.combineSen.lookup_table:share(protos.lm.combineSen.lookup_table, 'weight', 'bias')
-thin_lm.core_img:share(protos.lm.core_img, 'weight', 'bias')
+local thin_am = protos.am:clone()
+thin_am.core:share(protos.am.core, 'weight', 'bias') -- TODO: we are assuming that LM has specific members! figure out clean way to get rid of, not modular.
+thin_am.predict:share(protos.am.predict, 'weight', 'bias')
+thin_am.combineSen.lookup_table:share(protos.am.combineSen.lookup_table, 'weight', 'bias')
+thin_am.product:share(protos.am.product, 'weight', 'bias')
 
--- local thin_cnn = protos.cnn:clone('weight', 'bias')
--- sanitize all modules of gradient storage so that we dont save big checkpoints
--- net_utils.sanitize_gradients(thin_cnn)
-local lm_modules = thin_lm:getModulesList()
-for k,v in pairs(lm_modules) do net_utils.sanitize_gradients(v) end
+local am_modules = thin_am:getModulesList()
+for k,v in pairs(am_modules) do net_utils.sanitize_gradients(v) end
 
--- create clones and ensure parameter sharing. we have to do this
--- all the way here at the end because calls such as :cuda() and
--- :getParameters() reshuffle memory around.
-protos.lm:createClones()
+protos.am:createClones()
 
 collectgarbage() -- "yeah, sure why not"
 -------------------------------------------------------------------------------
 -- Validation evaluation
 -------------------------------------------------------------------------------
+
+-- to save time
+local exseq = torch.LongTensor(protos.am.seq_length + 1, opt.batch_size * opt.seq_per_img)
+exseq:sub(1,1):fill(protos.am.vocab_size+1)
+local empty = torch.CudaTensor(opt.batch_size * opt.seq_per_img, protos.am.rnn_size):zero()
+
+
 local function eval_split(split, evalopt)
   local verbose = utils.getopt(evalopt, 'verbose', true)
   local val_images_use = utils.getopt(evalopt, 'val_images_use', true)
 
   --protos.cnn:evaluate()
-  protos.lm:evaluate()
+  protos.am:evaluate()
   for k,v in pairs(protos.cnn_part) do
 	v:evaluate()
   end
@@ -225,8 +209,6 @@ local function eval_split(split, evalopt)
   local n = 0
   local loss_sum = 0
   local loss_evals = 0
-  local predictions = {}
-  local vocab = loader:getVocab()
   while true do
 
     -- fetch a batch of data
@@ -237,43 +219,39 @@ local function eval_split(split, evalopt)
     -- forward the model to get loss
     local feats = cnn_utils.forward(protos.cnn_part, protos.feature_table , data.images)
 	local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
---    local expanded_feats = protos.expander:forward(feats)
-	table.insert(expanded_feats, data.labels)
-    local logprobs = protos.lm:forward(expanded_feats)
-	-- local logprobs = protos.lm:forward{expanded_feats, data.labels}
-    local loss = protos.crit:forward(logprobs, data.labels)
-    loss_sum = loss_sum + loss
-    loss_evals = loss_evals + 1
 
-    -- forward the model to also get generated samples for each image
-    local seq = protos.lm:sample(feats)
-    local sents = net_utils.decode_sequence(vocab, seq)
-    for k=1,#sents do
-      local entry = {image_id = data.infos[k].id, caption = sents[k]}
-      table.insert(predictions, entry)
-      if verbose then
-        print(string.format('image %s: %s', entry.image_id, entry.caption))
-      end
-    end
+	local seq = data.labels
+	exseq:sub(2,protos.am.seq_length+1):copy(seq)
+	local texseq = exseq:t()
 
-    -- if we wrapped around the split or used up val imgs budget then bail
+	local loss_it = 0
+
+	for i=1,protos.am.seq_length do
+
+		local input = {unpack(expanded_feats)}
+		table.insert(input, texseq:sub(1,opt.batch_size * opt.seq_per_img,1,i))
+		local logprobs = protos.am:forward(input)
+		local loss = protos.crit:forward(logprobs[2], seq:sub(1,i))
+		loss_it = loss_it + loss
+		loss_evals = loss_evals + 1
+
+	end
+
+	loss_sum = loss_sum + loss_it
+
     local ix0 = data.bounds.it_pos_now
     local ix1 = math.min(data.bounds.it_max, val_images_use)
-    if verbose then
-      print(string.format('evaluating validation performance... %d/%d (%f)', ix0-1, ix1, loss))
-    end
+	print(string.format('evaluating validation performance... %d/%d (%f)', ix0-1, ix1, loss_it/protos.am.seq_length))
+
+    -- if we wrapped around the split or used up val imgs budget then bail
+
 
     if loss_evals % 10 == 0 then collectgarbage() end
     if data.bounds.wrapped then break end -- the split ran out of data, lets break out
     if n >= val_images_use then break end -- we've used enough images
   end
 
-  local lang_stats
-  if opt.language_eval == 1 then
-    lang_stats = net_utils.language_eval(predictions, opt.id)
-  end
-
-  return loss_sum/loss_evals, predictions, lang_stats
+  return loss_sum/loss_evals
 end
 
 -------------------------------------------------------------------------------
@@ -282,21 +260,13 @@ end
 local iter = 0
 
 local function lossFun()
-  -- protos.cnn:training()
-  protos.lm:training()
-  --print(protos.cnn_part:type())
+
+  protos.am:training()
   for i=1,40 do
-	--print('i: '..i)
-	--print(protos.cnn_part[i])
 	protos.cnn_part[i]:training()
   end
 
-
   grad_params:zero()
-  if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
-    cnn_grad_params:zero()
-  end
-
   -----------------------------------------------------------------------------
   -- Forward pass
   -----------------------------------------------------------------------------
@@ -307,50 +277,46 @@ local function lossFun()
   -- data.seq: LxM where L is sequence length upper bound, and M = N*seq_per_img
 
   -- forward the ConvNet on images (most work happens here)
-  --local feats = protos.cnn:forward(data.images)
   local feats = cnn_utils.forward(protos.cnn_part, protos.feature_table , data.images)
   local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
--- we have to expand out image features, once for each sentence
---  local expanded_feats = protos.expander:forward(feats)
-  -- forward the language model
-  table.insert(expanded_feats, data.labels)
-  local logprobs = protos.lm:forward(expanded_feats)
-  -- forward the language model criterion
-  local loss = protos.crit:forward(logprobs, data.labels)
+  -- we have to expand out image features, once for each sentence
+  -- forward the attention model
 
-  -----------------------------------------------------------------------------
-  -- Backward pass
-  -----------------------------------------------------------------------------
-  -- backprop criterion
-  local dlogprobs = protos.crit:backward(logprobs, data.labels)
-  -- backprop language model
-  local dgrad= protos.lm:backward(expanded_feats, dlogprobs)
-  -- backprop the CNN, but only if we are finetuning
-  if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after then
-    local dfeats = protos.expander:backward(feats, dexpanded_feats)
-    local dx = protos.cnn:backward(data.images, dfeats)
-  end
+  local seq = data.labels
+  exseq:sub(2,protos.am.seq_length+1):copy(seq)
+  local texseq = exseq:t()
 
+  local losssum = 0
+  for i=1, protos.am.seq_length do
+
+	local input = {unpack(expanded_feats)}
+	table.insert(input, texseq:sub(1,opt.batch_size * opt.seq_per_img,1,i))
+	local logprobs = protos.am:forward(input)
+	local loss = protos.crit:forward(logprobs[2], seq:sub(1,i))
+	losssum = losssum + loss
+	-----------------------------------------------------------------------------
+	-- Backward pass
+	-----------------------------------------------------------------------------
+	-- backprop criterion
+	local dlogprobs = protos.crit:backward(logprobs[2], seq:sub(1,i))
+	-- backprop language model
+	local dgrad= protos.am:backward(input, {empty, dlogprobs})
+	-- backprop the CNN, but only if we are finetuning
+
+ end
+ losssum = losssum/protos.am.seq_length
   -- clip gradients
   -- print(string.format('claming %f%% of gradients', 100*torch.mean(torch.gt(torch.abs(grad_params), opt.grad_clip))))
   grad_params:clamp(-opt.grad_clip, opt.grad_clip)
 
   -- apply L2 regularization
-  -- if opt.cnn_weight_decay > 0 then
-    -- cnn_grad_params:add(opt.cnn_weight_decay, cnn_params)
-    -- note: we don't bother adding the l2 loss to the total loss, meh.
-    -- cnn_grad_params:clamp(-opt.grad_clip, opt.grad_clip)
-  --end
   -----------------------------------------------------------------------------
 
   -- and lets get out!
-  local losses = { total_loss = loss }
+  local losses = { total_loss = losssum }
   return losses
 end
 
--------------------------------------------------------------------------------
--- Main loop
--------------------------------------------------------------------------------
 local loss0
 local optim_state = {}
 local cnn_optim_state = {}
@@ -369,13 +335,9 @@ while true do
   if (iter % opt.save_checkpoint_every == 0 or iter == opt.max_iters-1) then
 
     -- evaluate the validation performance
-    local val_loss, val_predictions, lang_stats = eval_split('val', {val_images_use = opt.val_images_use})
+    local val_loss = eval_split('val', {val_images_use = opt.val_images_use})
     print('validation loss: ', val_loss)
-    print(lang_stats)
     val_loss_history[iter] = val_loss
-    if lang_stats then
-      val_lang_stats_history[iter] = lang_stats
-    end
 
     local checkpoint_path = path.join(opt.checkpoint_path, 'model_id' .. opt.id)
 
@@ -385,34 +347,25 @@ while true do
     checkpoint.iter = iter
     checkpoint.loss_history = loss_history
     checkpoint.val_loss_history = val_loss_history
-    checkpoint.val_predictions = val_predictions -- save these too for CIDEr/METEOR/etc eval
-    checkpoint.val_lang_stats_history = val_lang_stats_history
+    --save these too for CIDEr/METEOR/etc eval
+    --checkpoint.val_lang_stats_history = val_lang_stats_history
 
     utils.write_json(checkpoint_path .. '.json', checkpoint)
     print('wrote json checkpoint to ' .. checkpoint_path .. '.json')
 
     -- write the full model checkpoint as well if we did better than ever
-    local current_score
-    if lang_stats then
-      -- use CIDEr score for deciding how well we did
-      current_score = lang_stats['CIDEr']
-    else
-      -- use the (negative) validation loss as a score
-      current_score = -val_loss
-    end
+	local current_score = -val_loss
     if best_score == nil or current_score > best_score then
       best_score = current_score
       if iter > 0 then -- dont save on very first iteration
         -- include the protos (which have weights) and save to file
         local save_protos = {}
         print('best_score : '..best_score)
-		save_protos.lm = thin_lm -- these are shared clones, and point to correct param storage
-        save_protos.cnn_part = thin_cnn_part
-
+		save_protos.am = thin_am -- these are shared clones, and point to correct param storage
         checkpoint.protos = save_protos
         -- also include the vocabulary mapping so that we can use the checkpoint
         -- alone to run on arbitrary images without the data loader
-        checkpoint.vocab = loader:getVocab()
+        --checkpoint.vocab = loader:getVocab()
         torch.save(checkpoint_path .. '.t7', checkpoint)
         print('wrote checkpoint to ' .. checkpoint_path .. '.t7')
       end
@@ -426,7 +379,6 @@ while true do
     local frac = (iter - opt.learning_rate_decay_start) / opt.learning_rate_decay_every
     local decay_factor = math.pow(0.5, frac)
     learning_rate = learning_rate * decay_factor -- set the decayed rate
-    cnn_learning_rate = cnn_learning_rate * decay_factor
   end
 
   -- perform a parameter update
@@ -470,3 +422,10 @@ while true do
   if opt.max_iters > 0 and iter >= opt.max_iters then break end -- stopping criterion
 
 end
+
+
+
+
+
+
+
