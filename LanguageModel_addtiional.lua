@@ -5,6 +5,7 @@ local GRU = require 'misc.GRU'
 local MLGRU = require 'MultiLayerGRU'
 require 'ConstructAttention'
 require 'CombineSentence'
+require 'AttentionModel'
 
 -------------------------------------------------------------------------------
 -- Language Model core
@@ -29,15 +30,29 @@ function layer:__init(opt)
   self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.input_encoding_size)
   self:_createInitState(1) -- will be lazily resized later during forward passes
 
-  self.core_img = GRU.gru(self.input_encoding_size, self.input_encoding_size, self.input_encoding_size, 1, dropout)
+  self.finetune_att = utils.getopt(opt, 'finetune_att', false)
+  self.attmodel_path = utils.getopt(opt, 'attmodel_path', 0)
+  print(self.attmodel_path)
+  if self.attmodel_path ~= 0 then
+	local checkpoint = torch.load(self.attmodel_path)
+	--print(checkpoint)
+	self.attmodel = checkpoint.protos.am
+  else
+	print('constructing fresh attmodel')
+	self.attmodel = nn.AttentionModel(opt)
+  end
+  --print('111111111111')
+  print(self.attmodel)
+  self.LogSoftMax = nn.LogSoftMax()
 
-  self.constructAtt_o = nn.ConstructAttention(opt, 'overall')
-  self.constructAtt_ls = nn.ConstructAttention(opt, 'local')
 
-  self.combineSen = nn.SenInfo(opt)
+  self:_createInitState(1)
 
-  self:_createInitState_img(1)
+end
 
+function layer:loadattmodel()
+	local checkpoint = torch.load(self.attmodel_path)
+	self.attmodel = checkpoint.protos.am
 end
 
 function layer:_createInitState(batch_size)
@@ -60,21 +75,6 @@ function layer:_createInitState(batch_size)
 
 end
 
-function layer:_createInitState_img(batch_size)
-
-	assert(batch_size ~= nil, 'batch size must be provided')
-	if not self.init_state_img then self.init_state_img = {} end
-	if self.init_state_img[1] then
-		if self.init_state_img[1]:size(1) ~= batch_size then
-			self.init_state_img[1]:resize(batch_size, self.encoding_size):zero()
-		end
-	else
-		self.init_state_img[1] = torch.zeros(batch_size, self.rnn_size)
-	end
-	self.num_state_img = 1
-
-end
-
 
 
 function layer:createClones()
@@ -82,53 +82,35 @@ function layer:createClones()
   print('constructing clones inside the LanguageModel')
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
-  self.combineSens = {self.combineSen}
   for t=2,self.seq_length+2 do
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
-	self.combineSens[t] = self.combineSen:clone('weight','gradWeight')
   end
 end
 
-function layer:createClones_img()
-
-  print('constructing clones inside the core_img')
-  self.clones_img = {}
-  for t=1,self.seq_length+2 do
-	self.clones_img[t] = {}
-	for h=1,self.num_of_local_img+1 do
-		if t==1 and h==1 then
-			self.clones_img[t][h] = self.core_img
-		else
-			self.clones_img[t][h] = self.core_img:clone('weight', 'bias', 'gradWeight', 'gradbias')
-		end
-	end
-  end
-
-end
 
 function layer:getModulesList()
-  return {self.core, self.lookup_table, self.core_img, self.combineSen.lookup_table}
+  return {self.core, self.lookup_table, self.attmodel.core, self.attmodel.predict, self.attmodel.product, self.attmodel.combineSen}
 end
 
 function layer:parameters()
   -- we only have two internal modules, return their params
   local p1,g1 = self.core:parameters()
   local p2,g2 = self.lookup_table:parameters()
-  local p3,g3 = self.core_img:parameters()
-  local p4,g4 = self.combineSen.lookup_table:parameters()
+  local p3,g3
+  if self.finetune_att then p3,g3 = self.attmodel:parameters() end
 
   local params = {}
   for k,v in pairs(p1) do table.insert(params, v) end
   for k,v in pairs(p2) do table.insert(params, v) end
-  for k,v in pairs(p3) do table.insert(params, v) end
-  for k,v in pairs(p4) do table.insert(params, v) end
+  if self.finetune_att then for k,v in pairs(p3) do table.insert(params, v) end end
+
 
   local grad_params = {}
   for k,v in pairs(g1) do table.insert(grad_params, v) end
   for k,v in pairs(g2) do table.insert(grad_params, v) end
-  for k,v in pairs(g3) do table.insert(grad_params, v) end
-  for k,v in pairs(g4) do table.insert(grad_params, v) end
+  if self.finetune_att then for k,v in pairs(g3) do table.insert(grad_params, v) end end
+
 
   -- todo: invalidate self.clones if params were requested?
   -- what if someone outside of us decided to call getParameters() or something?
@@ -139,28 +121,16 @@ end
 
 function layer:training()
   if self.clones == nil then self:createClones() end -- create these lazily if needed
-  if self.clones_img == nil then self:createClones_img() end
   for k,v in pairs(self.clones) do v:training() end
-  for k,v in pairs(self.clones_img) do
-	for k1,v1 in pairs(v) do
-		v1:training()
-	end
-  end
   for k,v in pairs(self.lookup_tables) do v:training() end
-  for k,v in pairs(self.combineSens) do v.lookup_table:training() end
+  self.attmodel:training()
 end
 
 function layer:evaluate()
   if self.clones == nil then self:createClones() end -- create these lazily if needed
-  if self.clones_img == nil then self:createClones_img() end
   for k,v in pairs(self.clones) do v:evaluate() end
-  for k,v in pairs(self.clones_img) do
-	for k1,v1 in pairs(v) do
-		v1:evaluate()
-	end
-  end
   for k,v in pairs(self.lookup_tables) do v:evaluate() end
-  for k,v in pairs(self.combineSens) do v.lookup_table:evaluate() end
+  self.attmodel:evaluate()
 end
 
 --[[
@@ -176,19 +146,18 @@ function layer:sample(imgs, opt)
   if sample_max == 1 and beam_size > 1 then return self:sample_beam(imgs, opt) end -- indirection for beam search
 
   assert( #imgs == self.num_of_local_img+1, 'no accordance')
+  assert( #imgs == 2)
 
 
   local batch_size = imgs[#imgs]:size(1)
   self.batch_size = batch_size
   self:_createInitState(batch_size)
-  self:_createInitState_img(batch_size)
   local state = self.init_state
-  local state_img = self.init_state_img[1]
-
   -- we will write output predictions into tensor seq
   local seq = torch.LongTensor(self.seq_length, batch_size):zero()
   local seqLogprobs = torch.FloatTensor(self.seq_length, batch_size)
   local logprobs -- logprobs predicted in last time step
+  local logprobs_att -- logprobs provided by att
   -- A
   local subseq = torch.LongTensor(self.seq_length + 1, batch_size):zero()
   -- A
@@ -196,7 +165,7 @@ function layer:sample(imgs, opt)
 
     local xt, it, sampleLogprobs
     if t == 1 then
-	  xt = imgs[self.num_of_local_img + 1]
+	  xt = imgs[1]
 	elseif t == 2 then
       -- feed in the start tokens
       it = torch.LongTensor(batch_size):fill(self.vocab_size+1)
@@ -212,6 +181,8 @@ function layer:sample(imgs, opt)
         local prob_prev
         if temperature == 1.0 then
           prob_prev = torch.exp(logprobs) -- fetch prev distribution: shape Nx(M+1)
+		  local att_prob = torch.exp(logprobs_att)
+		  prob_prev = 0.7*prob_prev + 0.3*att_prob
         else
           -- scale logprobs by temperature
           prob_prev = torch.exp(torch.div(logprobs, temperature))
@@ -230,38 +201,27 @@ function layer:sample(imgs, opt)
 
 	if t > 1 then subseq[t-1] = it end
 
-	local imgFeature = {}
-
+	local att_output = {}
 	if t > 1 then
-		local combineS = self.combineSen:forward(subseq:sub(1,t-1):t())
-		for i=1,self.num_of_local_img do
-			imgFeature[i] = self.constructAtt_ls:forward({imgs[i], combineS})
-		end
-		imgFeature[self.num_of_local_img+1] = self.constructAtt_o:forward({imgs[self.num_of_local_img+1], combineS})
-		-- assert( #state == 3,'num_layers is not accordance with expectation')
+		att_output = self.attmodel:forward({imgs[1], imgs[2], subseq:sub(1,t-1):t()})
 	else
-		for i=1,self.num_of_local_img do
-			imgFeature[i] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-		end
-		imgFeature[self.num_of_local_img+1] = imgs[self.num_of_local_img+1]
+		att_output[1] = imgs[1]
 	end
 
-	for i=1, self.num_of_local_img+1 do
-		inputs = {imgFeature[i]}
-		table.insert(inputs, state_img)
-		local output = self.core_img:forward(inputs)
-		state_img = output
-	end
 
 	-- assert( #state == 3,'num_layers is not accordance with expectation')
 
     inputs = {xt}
 	table.insert(inputs, state[1])
-	table.insert(inputs, state_img)
+	table.insert(inputs, att_output[1])
 
     local out = self.core:forward(inputs)
     logprobs = out[self.num_state+1] -- last element is the output vector
     state = {}
+
+	if t>1 then
+		logprobs_att = self.LogSoftMax:forward(att_output[2])
+	end
     for i=1,self.num_state do table.insert(state, out[i]) end
 
   end
@@ -436,27 +396,23 @@ function layer:updateOutput(input)
 
   local seq = input[#input]
   if self.clones == nil then self:createClones() end -- lazily create clones on first forward pass
-  if self.clones_img == nil then self:createClones_img() end
 
   assert(seq:size(1) == self.seq_length)
   local batch_size = seq:size(2)
   self.output:resize(self.seq_length+2, batch_size, self.vocab_size+1)
 
   self:_createInitState(batch_size)
-  self:_createInitState_img(batch_size)
 
   self.state = {[0] = self.init_state}
-  self.state_img = {}
-  self.out_img = {}
+  self.out_att = {}
   self.inputs = {}
-  self.inputs_img = {}
   self.lookup_tables_inputs = {}
   self.tmax = 0 -- we will keep track of max sequence length encountered in the data for efficiency
 
   self.subseq = torch.LongTensor(self.seq_length+1, batch_size)
   self.subseq:sub(2,self.seq_length+1, 1,batch_size):copy(seq)
   self.subseq:sub(1,1):fill(self.vocab_size+1)
-  self.combineS = {}
+  self.subseq[torch.eq(self.subseq, 0)] = 1
   self.batch_size = batch_size
 
   for t=1,self.seq_length+2 do
@@ -464,8 +420,8 @@ function layer:updateOutput(input)
     local can_skip = false
     local xt
 	if t == 1 then
-	  xt = input[self.num_of_local_img+1]
-    elseif t == 1 then
+	  xt = input[1]
+    elseif t == 2 then
       -- feed in the start tokens
       local it = torch.LongTensor(batch_size):fill(self.vocab_size+1)
       self.lookup_tables_inputs[t] = it
@@ -496,45 +452,25 @@ function layer:updateOutput(input)
 	if not can_skip then
       -- construct the inputs
 
-	  local imgFeature = {}
+	  local att_output = {}
 
 	  if t > 1 then
-		local comseq = self.subseq:sub(1,t-1):t()
-		comseq[torch.eq(comseq, 0)] = 1
-		self.combineS[t] = self.combineSens[t]:forward(comseq)
-		for i=1,self.num_of_local_img do
-			-- print({input[i], self.combineS[t]})
-			imgFeature[i] = self.constructAtt_ls:forward({input[i], self.combineS[t]})
-		end
-		imgFeature[self.num_of_local_img+1] = self.constructAtt_o:forward({input[self.num_of_local_img+1], self.combineS[t]})
-		-- assert( #state == 3,'num_layers is not accordance with expectation')
+		att_output = self.attmodel:forward({input[1], input[2], self.subseq:sub(1,t-1):t()})
 	  else
-		for i=1,self.num_of_local_img do
-			imgFeature[i] = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-		end
-		imgFeature[self.num_of_local_img+1] = input[self.num_of_local_img+1]
+		att_output[1] = input[1]
 	  end
 
-	  self.state_img[t] = {[0] = self.init_state_img[1]}
-	  self.inputs_img[t] = {}
 
-	  for i=1,self.num_of_local_img+1 do
-		self.inputs_img[t][i] = {imgFeature[i]}
-		table.insert(self.inputs_img[t][i], self.state_img[t][i-1])
-		-- rint({i,self.inputs_img[t][i]})
-		local out = self.clones_img[t][i]:forward(self.inputs_img[t][i])
-		self.state_img[t][i] = out
-	  end
 
 	  self.inputs[t] = {xt}
 	  table.insert(self.inputs[t], self.state[t-1][1])
-	  table.insert(self.inputs[t], self.state_img[t][self.num_of_local_img+1])
+	  table.insert(self.inputs[t], att_output[1])
 
-
+	  --print(self.inputs[t])
 	  local out = self.clones[t]:forward(self.inputs[t])
       -- process the outputs
       self.output[t] = out[self.num_state+1] -- last element is the output vector
-      self.state[t] = {} -- the rest is state
+	  self.state[t] = {} -- the rest is state
       for i=1,self.num_state do table.insert(self.state[t], out[i]) end
       self.tmax = t
     end
@@ -557,7 +493,7 @@ function layer:updateGradInput(input, gradOutput)
     -- concat state gradients and output vector gradients at time step t
     local dout = {}
     for k=1,#dstate[t] do table.insert(dout, dstate[t][k]) end
-    table.insert(dout, gradOutput[t])
+	table.insert(dout, gradOutput[t])
     local dinputs = self.clones[t]:backward(self.inputs[t], dout)
     -- split the gradient to xt and to state
     -- assert( #dinputs == 7)
@@ -571,54 +507,13 @@ function layer:updateGradInput(input, gradOutput)
 
     -- continue backprop of xt
 	local it = self.lookup_tables_inputs[t]
-	if t>1 then self.lookup_tables[t]:backward(it, dxt) -- backprop into lookup table
-	else dgls[self.num_of_local_img+1]:add(dxt)
+	if t>1 then self.lookup_tables[t]:backward(it, dxt) end-- backprop into lookup tab
 
-	-- print({self.tmax, t})
+ end
 
-	local dsen = torch.FloatTensor(self.batch_size, self.input_encoding_size):zero():type(self._type)
-
-	local dimg_feature = {}
-
-	local dimg = dinputs[3]
-	for i=self.num_of_local_img+1,1,-1 do
-		local dgrad = self.clones_img[t][i]:backward(self.inputs_img[t][i], dimg)
-		dimg_feature[i] = dgrad[1]
-		dimg = dgrad[2]
-	end
-
-	local dgl = {}
-
-	-- print(dinputs[1])
-
-	if t > 1 then
-		for i=1,self.num_of_local_img do
-			local dg = self.constructAtt_ls:backward({input[i], self.combineS[t]}, dimg_feature[i])
-			dgl[i] = dg[1]
-			dsen:add(dg[2])
-		end
-		local dg = self.constructAtt_o:backward({input[self.num_of_local_img+1], self.combineS[t]}, dimg_feature[self.num_of_local_img+1])
-		dgl[self.num_of_local_img+1] = dg[1]
-		dsen:add(dg[2])
-		self.combineSens[t]:backward(self.subseq:sub(1,t):t(), dsen)
-	end
-
-
-	if t == self.tmax then
-		for i=1,self.num_of_local_img+1 do dgls[i] = dgl[i]:clone() end
-	elseif t > 1 then
-		for i=1,self.num_of_local_img+1 do dgls[i]:add(dgl[i]) end
-	else
-		dgls[self.num_of_local_img+1]:add(dimg_feature[self.num_of_local_img+1])
-	end
-
-  end
 
   -- we have gradient on image, but for LongTensor gt sequence we only create an empty tensor - can't backprop
-  self.gradInput = {}
-
-  for i=1,self.num_of_local_img+1 do table.insert(self.gradInput, dgls[i]) end
-  table.insert(self.gradInput, torch.Tensor())
+  self.gradInput = {torch.Tensor(), torch.Tensor(), torch.Tensor()}
   return self.gradInput
 end
 
@@ -632,7 +527,7 @@ function crit:__init()
 end
 
 --[[
-input is a Tensor of size (D+1)xNx(M+1)
+input is a Tensor of size (D+2)xNx(M+1)
 seq is a LongTensor of size DxN. The way we infer the target
 in this criterion is as follows:
 - at first time step the output is ignored (loss = 0). It's the image tick
@@ -645,24 +540,24 @@ function crit:updateOutput(input, seq)
   self.gradInput:resizeAs(input):zero() -- reset to zeros
   local L,N,Mp1 = input:size(1), input:size(2), input:size(3)
   local D = seq:size(1)
-  assert(D == L-1, 'input Tensor should be 1 larger in time')
+  assert(D == L-2, 'input Tensor should be 2 larger in time')
 
   local loss = 0
   local n = 0
   for b=1,N do -- iterate over batches
     local first_time = true
-    for t=1,L do -- iterate over sequence time (ignore t=1, dummy forward for the image)
+    for t=2,L do -- iterate over sequence time (ignore t=1, dummy forward for the image)
 
       -- fetch the index of the next token in the sequence
       local target_index
-      if t > D then -- we are out of bounds of the index sequence: pad with null tokens
+      if t-1 > D then -- we are out of bounds of the index sequence: pad with null tokens
         target_index = 0
       else
-        target_index = seq[{t,b}] -- t is correct, since at t=1 START::::token was fed in and we want to predict first word (and 2-1 = 1).
+        target_index = seq[{t-1,b}] -- t-1 is correct, since at t=2 START token was fed in and we want to predict first word (and 2-1 = 1).
       end
       -- the first time we see null token as next index, actually want the model to predict the END token
-	  if target_index == 0 and first_time then
-		target_index = Mp1
+      if target_index == 0 and first_time then
+        target_index = Mp1
         first_time = false
       end
 
@@ -678,7 +573,6 @@ function crit:updateOutput(input, seq)
   end
   self.output = loss / n -- normalize by number of predictions that were made
   self.gradInput:div(n)
-  -- print(self.gradInput)
   return self.output
 end
 

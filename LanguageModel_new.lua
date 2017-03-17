@@ -24,6 +24,7 @@ function layer:__init(opt)
   local dropout = utils.getopt(opt, 'dropout', 0)
   -- options for Language Model
   self.seq_length = utils.getopt(opt, 'seq_length')
+  self.get_top_num = utils.getopt(opt, 'get_top_num')
   -- create the core lstm network. note +1 for both the START and END tokens
   self.core = MLGRU.mlgru(self.input_encoding_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
   self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.input_encoding_size)

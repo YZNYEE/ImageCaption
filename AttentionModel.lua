@@ -83,7 +83,7 @@ function layer:evaluate()
 	if self.clones == nil then self:createClone() end
 	assert( #self.clones == 2)
 
-	self.combineSen:evaluate()
+	self.combineSen.lookup_table:evaluate()
 	self.predict:evaluate()
 	self.product:evaluate()
 	self.tanh:evaluate()
@@ -99,7 +99,7 @@ function layer:train()
 
 	self.product:train()
 	self.tanh:train()
-	self.combineSen:train()
+	self.combineSen.lookup_table:train()
 	self.predict:train()
 	self.clones[1]:train()
 	self.clones[2]:train()
@@ -204,6 +204,22 @@ function layer:updateGradInput(inputs, gradOutput)
 
 end
 
+function layer:clone(...)
+
+    local f = torch.MemoryFile("rw"):binary()
+    f:writeObject(self)
+    f:seek(1)
+    local clone = f:readObject()
+    f:close()
+
+    clone.combineSen = self.combineSen:clone(...)
+	clone.predict = self.predict:clone()
+	clone.product = self.product:clone()
+	clone.tanh = self.tanh:clone()
+
+    return clone
+
+end
 
 local crit, parent = torch.class('nn.AttentionCriterion', 'nn.Criterion')
 function crit:__init(opt)
@@ -283,9 +299,13 @@ function crit_dis:reset(MP1)
 	if self.flag then
 		self.flag:zero()
 		self.used:zero()
+		self.grad:zero()
+		self.exscore:zero()
 	else
 		self.flag = torch.LongTensor(MP1):zero()
 		self.used = torch.LongTensor(MP1):zero()
+		self.grad = torch.CudaTensor(MP1):zero()
+		self.exscore = torch.CudaTensor(MP1):zero()
 	end
 
 end
@@ -323,6 +343,7 @@ function crit_dis:updateOutput(inputs, seq)
 
 		for j=t,D do
 
+			--print({i,j})
 			local target_index = seq[j][i]
 			if target_index == 0 then target_index = MP1 end
 			local flag = true
@@ -334,34 +355,33 @@ function crit_dis:updateOutput(inputs, seq)
 				local score = input[i][target_index]
 				self.used[target_index] = 1
 
+				self.exscore:fill(score)
 				-- compute every pair i,j score in ith sample
-				for x=1,MP1 do
-
-					-- if x is target_index, do nothing
-					if self.flag[x] == 0 then
-
-						local scorex = input[i][x]
-						local ls = getmax(0, 1-(score-scorex))
-						loss = loss + ls
-						n = n + 1
-						if ls ~= 0 then
-							self.gradInput[i][x] = self.gradInput[i][x] + 1
-							self.gradInput[i][target_index] = self.gradInput[i][target_index] - 1
-						end
-
-					end
-
-				end
-
+				local sc = 1-(self.exscore - input[i])
+				-- eliminate the words in label
+				sc[torch.eq(self.flag, 1)] = 0
+				-- get loss
+				local ls = torch.cmax(sc, 0)
+				loss = loss + torch.sum(ls)
+				-- compute grad
+				-- first set grad as 1
+				self.grad:fill(1)
+				-- eliminate the words that contribute nothing
+				self.grad[torch.eq(ls, 0)] = 0
+				-- summarize the num of words whose contribution is larger than 0
+				local num = torch.sum(torch.gt(ls, 0))
+				-- set target_index as -n
+				self.grad[target_index] = 0-num
+				self.gradInput[i]:add(self.grad)
+				n = n + 1
 
 			end
-
 
 		end
 
 	end
-	self.output = loss/n
-	self.gradInput:div(n)
+	self.output = loss/(n*MP1)
+	self.gradInput:div(n*MP1)
 	return self.output
 
 end

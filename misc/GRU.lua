@@ -54,7 +54,7 @@ function GRU.predict(input_size, output_size, dropout)
 	local predict = nn.Sequential()
 	if dropout > 0 then predict:add(nn.Dropout(dropout)) end
 	predict:add(nn.Linear(input_size, output_size))
-	predict:add(nn.Tanh())
+	--predict:add(nn.Tanh())
 	return predict
 
 end

@@ -237,12 +237,12 @@ local function checkgrad()
 
 	local dtype = 'torch.DoubleTensor'
 	local opt = {}
-    opt.vocab_size = 5
+    opt.vocab_size = 10000
 	opt.encoding_size = 4
     opt.rnn_size = 3
     opt.dropout = 0
     opt.seq_length = 7
-    opt.batch_size = 2
+    opt.batch_size = 80
 	opt.local_img_num = 2
 	opt.get_top_num = 1
 

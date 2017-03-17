@@ -6,7 +6,7 @@ require 'loadcaffe'
 -- local imports
 local utils = require 'misc.utils'
 require 'misc.DataLoader'
-require 'LanguageModel_new'
+require 'LanguageModel_addtiional'
 local net_utils = require 'misc.net_utils'
 local cnn_utils = require 'cnn_utils'
 require 'misc.optim_updates'
@@ -27,6 +27,8 @@ cmd:option('-input_json','coco/data.json','path to the json file containing addi
 cmd:option('-cnn_proto','model/VGG_ILSVRC_16_layers_deploy.prototxt','path to CNN prototxt file in Caffe format. Note this MUST be a VGGNet-16 right now.')
 cmd:option('-cnn_model','model/VGG_ILSVRC_16_layers.caffemodel','path to CNN model file containing the weights, Caffe format. Note this MUST be a VGGNet-16 right now.')
 cmd:option('-start_from', '', 'path to a model checkpoint to initialize model weights from. Empty = don\'t')
+cmd:option('-attmodel_path','', 'path to attmodel')
+cmd:option('-finetune_att',false,'')
 
 -- Model settings
 cmd:option('-rnn_size',512,'size of the rnn in number of hidden nodes in each layer')
@@ -111,7 +113,7 @@ if string.len(opt.start_from) > 0 then
   local lm_modules = protos.lm:getModulesList()
   for k,v in pairs(lm_modules) do net_utils.unsanitize_gradients(v) end
   protos.crit = nn.LanguageModelCriterion() -- not in checkpoints, create manually
-  protos.expander = nn.FeatExpander(opt.seq_per_img) -- not in checkpoints, create manually
+  protos.lm:loadattmodel()
 
   local cnn_backend = opt.backend
   if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
@@ -134,6 +136,10 @@ else
   lmOpt.get_top_num = opt.get_top_num
   lmOpt.local_img_num = 14*14
   lmOpt.num_of_local_img = opt.num_of_local_img
+
+  lmOpt.attmodel_path = opt.attmodel_path
+  lmOpt.finetune_att = opt.finetune_att
+
   lmOpt.feature_table = {}
 
   for i=1,string.len(opt.index_of_feature),2 do
@@ -193,8 +199,6 @@ assert(params:nElement() == grad_params:nElement())
 local thin_lm = protos.lm:clone()
 thin_lm.core:share(protos.lm.core, 'weight', 'bias') -- TODO: we are assuming that LM has specific members! figure out clean way to get rid of, not modular.
 thin_lm.lookup_table:share(protos.lm.lookup_table, 'weight', 'bias')
-thin_lm.combineSen.lookup_table:share(protos.lm.combineSen.lookup_table, 'weight', 'bias')
-thin_lm.core_img:share(protos.lm.core_img, 'weight', 'bias')
 
 -- local thin_cnn = protos.cnn:clone('weight', 'bias')
 -- sanitize all modules of gradient storage so that we dont save big checkpoints
@@ -400,6 +404,7 @@ while true do
       -- use the (negative) validation loss as a score
       current_score = -val_loss
     end
+	print(current_score)
     if best_score == nil or current_score > best_score then
       best_score = current_score
       if iter > 0 then -- dont save on very first iteration
