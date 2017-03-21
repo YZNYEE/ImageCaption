@@ -43,7 +43,7 @@ local function forwardApiTestFactory(dtype)
 	opt.get_top_num = 6
 	opt.num_of_local_img = 1
 
-	opt.finetune_att = false
+	opt.finetune_att = true
 	opt.attmodel_path = 0
 
 	local lm = nn.LanguageModel(opt)
@@ -101,7 +101,7 @@ local function gradCheckLM()
   opt.input_encoding_size = 4
   opt.encoding_size = 4
   opt.rnn_size = 4
-  opt.num_layers = 2
+  opt.num_layers = 1
   opt.dropout = 0
   opt.seq_length = 7
   opt.batch_size = 6
@@ -109,6 +109,8 @@ local function gradCheckLM()
   opt.local_img_num = 9
   opt.get_top_num = 6
   opt.num_of_local_img = 1
+
+  opt.finetune_att = true
 
   local lm = nn.LanguageModel(opt)
   local crit = nn.LanguageModelCriterion()
@@ -119,11 +121,10 @@ local function gradCheckLM()
   -- seq[{ {4, 7}, 1 }] = 0
   -- seq[{ {5, 7}, 4 }] = 0
   local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
-  -- local img_l2 = torch.randn(opt.batch_size, opt.local_img_num, opt.input_encoding_size):type(dtype)
   local img_o = torch.randn(opt.batch_size, opt.input_encoding_size):type(dtype)
 
   -- evaluate the analytic gradient
-  local input = {img_l1, img_o, seq}
+  local input = {img_o, img_l1, seq}
 
   local output = lm:forward(input)
   local w = torch.randn(output:size(1), output:size(2), output:size(3))
@@ -133,27 +134,25 @@ local function gradCheckLM()
   local gradInput = lm:backward(input, gradOutput)
 
   -- create a loss function wrapper
+  print(gradInput[1])
+
   local function f1(x)
-    local output = lm:forward{x, img_o, seq}
+    local output = lm:forward{x, img_l1, seq}
     local loss = torch.sum(torch.cmul(output, w))
     return loss
   end
 
   local function f2(x)
-    local output = lm:forward{img_l1, x, seq}
+    local output = lm:forward{img_o, x, seq}
     local loss = torch.sum(torch.cmul(output, w))
     return loss
   end
 
-  local function f3(x)
-    local output = lm:forward{img_l1, img_l2, x, seq}
-    local loss = torch.sum(torch.cmul(output, w))
-    return loss
-  end
 
-  local gradInput_num_l1 = gradcheck.numeric_gradient(f1, img_l1, 1, 1e-6)
-  -- local gradInput_num_l2 = gradcheck.numeric_gradient(f2, img_l2, 1, 1e-6)
-  local gradInput_num_o = gradcheck.numeric_gradient(f2, img_o, 1, 1e-6)
+  local gradInput_num_l1 = gradcheck.numeric_gradient(f2, img_l1, 1, 1e-6)
+  local gradInput_num_o = gradcheck.numeric_gradient(f1, img_o, 1, 1e-6)
+
+  print(gradInput_num_o)
 
   -- print(gradInput)
   -- print(gradInput_num)
@@ -164,14 +163,14 @@ local function gradCheckLM()
   --   print(i, g[i], gn[i], r)
   -- end
 
-  tester:assertTensorEq(gradInput[1], gradInput_num_l1, 1e-4)
-  tester:assertlt(gradcheck.relative_error(gradInput[1], gradInput_num_l1, 1e-8), 1e-4)
+  tester:assertTensorEq(gradInput[2], gradInput_num_l1, 1e-4)
+  tester:assertlt(gradcheck.relative_error(gradInput[2], gradInput_num_l1, 1e-8), 1e-4)
 
   -- tester:assertTensorEq(gradInput[2], gradInput_num_l2, 1e-4)
   -- tester:assertlt(gradcheck.relative_error(gradInput[2], gradInput_num_l2, 1e-8), 1e-4)
 
-  tester:assertTensorEq(gradInput[2], gradInput_num_o, 1e-4)
-  tester:assertlt(gradcheck.relative_error(gradInput[2], gradInput_num_o, 1e-8), 1e-4)
+  tester:assertTensorEq(gradInput[1], gradInput_num_o, 1e-4)
+  tester:assertlt(gradcheck.relative_error(gradInput[1], gradInput_num_o, 1e-8), 1e-4)
 end
 
 local function gradCheck()
@@ -261,7 +260,7 @@ local function overfit()
   opt.get_top_num = 6
   opt.num_of_local_img = 1
 
-  opt.finetune_att = false
+  opt.finetune_att = true
   opt.attmodel_path = 0
 
   local lm = nn.LanguageModel(opt)
@@ -327,7 +326,7 @@ local function sample()
   opt.get_top_num = 6
   opt.num_of_local_img = 1
 
-  opt.finetune_att = false
+  opt.finetune_att = true
   opt.attmodel_path = 0
 
   local lm = nn.LanguageModel(opt)
@@ -409,9 +408,9 @@ end
 tests.floatApiForwardTest = forwardApiTestFactory('torch.FloatTensor')
 --tests.cudaApiForwardTest = forwardApiTestFactory('torch.CudaTensor')
 --tests.gradCheck = gradCheck
---tests.gradCheckLM = gradCheckLM
+tests.gradCheckLM = gradCheckLM
 tests.overfit = overfit
-tests.sample = sample
+--tests.sample = sample
 -- tests.sample_beam = sample_beam
 
 tester:add(tests)

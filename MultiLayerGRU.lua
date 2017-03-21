@@ -3,6 +3,7 @@ require 'nngraph'
 require 'torch'
 
 -- multilayer_GRU inputs={xt, img1, img2, img3, ...}
+-- expand mlgru
 
 local MLGRU = {}
 
@@ -15,8 +16,9 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
     table.insert(inputs, nn.Identity()()) -- prev_h[L]
 	table.insert(inputs, nn.Identity()()) -- img
   end
+  table.insert(inputs, nn.Identity()())
 
-  assert(#inputs == 2*n+1,'error')
+  --assert(#inputs == 2*n+2,'error')
 
   function new_input_sum(insize,gsize, xv, hv, gv)
     local i2h = nn.Linear(insize, rnn_size)(xv)
@@ -54,9 +56,18 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
 	table.insert(outputs, next_h)
   end
 
+
+  local input_prob = inputs[#inputs]
+  if dropout > 0 then input_prob = nn.Dropout(dropout)(input_prob):annotate{name='input_prob'} end
+  input_prob = nn.Linear(output_size, rnn_size)(input_prob)
+  input_prob = nn.Tanh()(input_prob)
+
   local top_h = outputs[#outputs]
+  top_h = nn.CAddTable()({top_h, input_prob})
+
   if dropout > 0 then top_h = nn.Dropout(dropout)(top_h):annotate{name='drop_final'} end
   local proj = nn.Linear(rnn_size, output_size)(top_h):annotate{name='decoder'}
+
   local logsoft = nn.LogSoftMax()(proj)
   table.insert(outputs, logsoft)
 

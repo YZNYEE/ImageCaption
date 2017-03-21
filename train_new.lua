@@ -40,6 +40,7 @@ cmd:option('-batch_size',8,'what is the batch size in number of images per batch
 cmd:option('-grad_clip',0.1,'clip gradients at this value (note should be lower than usual 5 because we normalize grads by both batch and seq_length)')
 cmd:option('-drop_prob_lm', 0.5, 'strength of dropout in the Language Model RNN')
 cmd:option('-finetune_cnn_after', -1, 'After what iteration do we start finetuning the CNN? (-1 = disable; never finetune, 0 = finetune from start)')
+cmd:option('-finetune_att_after', -1, 'After what iteration do we start finetuning the ATT')
 cmd:option('-seq_per_img',5,'number of captions to sample for each image during training. Done for efficiency since CNN forward pass is expensive. E.g. coco has 5 sents/image')
 cmd:option('-get_top_num',5,'number of local img chosen')
 -- Optimization: for the Language Model
@@ -111,9 +112,13 @@ if string.len(opt.start_from) > 0 then
   protos = loaded_checkpoint.protos
   -- net_utils.unsanitize_gradients(protos.cnn)
   local lm_modules = protos.lm:getModulesList()
-  for k,v in pairs(lm_modules) do net_utils.unsanitize_gradients(v) end
   protos.crit = nn.LanguageModelCriterion() -- not in checkpoints, create manually
-  protos.lm:loadattmodel()
+  --protos.lm:loadattmodel()
+  protos.lm.attmodel:createMax()
+  protos.lm.attmodel.stack_num = 1
+  for k,v in pairs(lm_modules) do net_utils.unsanitize_gradients(v) end
+  protos.lm.attmodel:createClones()
+  --print(123456789)
 
   local cnn_backend = opt.backend
   if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
@@ -139,6 +144,7 @@ else
 
   lmOpt.attmodel_path = opt.attmodel_path
   lmOpt.finetune_att = opt.finetune_att
+  lmOpt.stack_num = 1
 
   lmOpt.feature_table = {}
 
@@ -186,6 +192,8 @@ print(protos.feature_table)
 
 -- flatten and prepare all model parameters to a single vector.
 -- Keep CNN params separate in case we want to try to get fancy with different optims on LM/CNN
+
+if opt.finetune_att_after > -1 then protos.lm.finetune_att = true end
 local params, grad_params = protos.lm:getParameters()
 -- local cnn_params, cnn_grad_params = protos.cnn:getParameters()
 print('total number of parameters in LM: ', params:nElement())
@@ -197,8 +205,13 @@ assert(params:nElement() == grad_params:nElement())
 -- modules. These thin module will have no intermediates and will be used
 -- for checkpointing to write significantly smaller checkpoint files
 local thin_lm = protos.lm:clone()
+
 thin_lm.core:share(protos.lm.core, 'weight', 'bias') -- TODO: we are assuming that LM has specific members! figure out clean way to get rid of, not modular.
 thin_lm.lookup_table:share(protos.lm.lookup_table, 'weight', 'bias')
+thin_lm.attmodel.combineSen.lookup_table:share(protos.lm.attmodel.combineSen.lookup_table, 'weight', 'bias')
+thin_lm.attmodel.predict:share(protos.lm.attmodel.predict, 'weight', 'bias')
+thin_lm.attmodel.product:share(protos.lm.attmodel.product, 'weight', 'bias')
+thin_lm.attmodel.core:share(protos.lm.attmodel.core, 'weight', 'bias')
 
 -- local thin_cnn = protos.cnn:clone('weight', 'bias')
 -- sanitize all modules of gradient storage so that we dont save big checkpoints
@@ -286,13 +299,9 @@ end
 local iter = 0
 
 local function lossFun()
-  -- protos.cnn:training()
   protos.lm:training()
-  --print(protos.cnn_part:type())
-  for i=1,40 do
-	--print('i: '..i)
-	--print(protos.cnn_part[i])
-	protos.cnn_part[i]:training()
+  for k,v in pairs(protos.cnn_part) do
+	v:training()
   end
 
 
@@ -311,11 +320,9 @@ local function lossFun()
   -- data.seq: LxM where L is sequence length upper bound, and M = N*seq_per_img
 
   -- forward the ConvNet on images (most work happens here)
-  --local feats = protos.cnn:forward(data.images)
   local feats = cnn_utils.forward(protos.cnn_part, protos.feature_table , data.images)
   local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
 -- we have to expand out image features, once for each sentence
---  local expanded_feats = protos.expander:forward(feats)
   -- forward the language model
   table.insert(expanded_feats, data.labels)
   local logprobs = protos.lm:forward(expanded_feats)
@@ -373,6 +380,8 @@ while true do
   if (iter % opt.save_checkpoint_every == 0 or iter == opt.max_iters-1) then
 
     -- evaluate the validation performance
+
+	--collectgarbage()
     local val_loss, val_predictions, lang_stats = eval_split('val', {val_images_use = opt.val_images_use})
     print('validation loss: ', val_loss)
     print(lang_stats)
@@ -466,7 +475,7 @@ while true do
 
   -- stopping criterions
   iter = iter + 1
-  if iter % 10 == 0 then collectgarbage() end -- good idea to do this once in a while, i think
+  if iter % 5 == 0 then collectgarbage() end -- good idea to do this once in a while, i think
   if loss0 == nil then loss0 = losses.total_loss end
   if losses.total_loss > loss0 * 20 then
     print('loss seems to be exploding, quitting.')

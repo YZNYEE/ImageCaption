@@ -42,6 +42,59 @@ function cnn_utils.build_cnn(cnn, opt)
   return cnn_part
 end
 
+
+function cnn_utils.build_cnn_total(cnn, opt)
+	  local layer_num = utils.getopt(opt, 'layer_num', 38)
+  local backend = utils.getopt(opt, 'backend', 'cudnn')
+  local encoding_size = utils.getopt(opt, 'encoding_size', 512)
+
+  if backend == 'cudnn' then
+    require 'cudnn'
+    backend = cudnn
+  elseif backend == 'nn' then
+    require 'nn'
+    backend = nn
+  else
+    error(string.format('Unrecognized backend "%s"', backend))
+  end
+
+  -- copy over the first layer_num layers of the CNN
+  local cnn_head = nn.Sequential()
+  local cnn_tail = nn.Sequential()
+  local cnn_concat = nn.ConcatTable()
+
+  for i = 1, layer_num do
+    local layer = cnn:get(i)
+    if i == 1 then
+      -- convert kernels in first conv layer into RGB format instead of BGR,
+      -- which is the order in which it was trained in Caffe
+      local w = layer.weight:clone()
+      -- swap weights to R and B channels
+      print('converting first layer conv filters from BGR to RGB...')
+      layer.weight[{ {}, 1, {}, {} }]:copy(w[{ {}, 3, {}, {} }])
+      layer.weight[{ {}, 3, {}, {} }]:copy(w[{ {}, 1, {}, {} }])
+    end
+
+    if i <= 30 then
+	  cnn_head:add(layer)
+	else
+	  cnn_tail:add(layer)
+	end
+
+  end
+
+  cnn_tail:add(nn.Linear(4096, encoding_size))
+  cnn_tail:add(backend.ReLU(true))
+
+  cnn_concat:add(cnn_tail)
+  cnn_concat:add(nn.Identity())
+  cnn_head:add(cnn_concat)
+
+  assert(#cnn_part == 38+2, 'layers of cnn is wrong')
+  return cnn_head
+
+end
+
 function cnn_utils.cnn_check(cnn_part)
 
 	local img = torch.randn(3, 224, 224)

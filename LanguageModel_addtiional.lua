@@ -41,9 +41,10 @@ function layer:__init(opt)
 	print('constructing fresh attmodel')
 	self.attmodel = nn.AttentionModel(opt)
   end
+  self.attmodel.stack_num = utils.getopt(opt, 'stack_num', 1)
+  self.attmodel:createMax()
   --print('111111111111')
   print(self.attmodel)
-  self.LogSoftMax = nn.LogSoftMax()
 
 
   self:_createInitState(1)
@@ -82,15 +83,17 @@ function layer:createClones()
   print('constructing clones inside the LanguageModel')
   self.clones = {self.core}
   self.lookup_tables = {self.lookup_table}
+  self.attmodels = {self.attmodel}
   for t=2,self.seq_length+2 do
     self.clones[t] = self.core:clone('weight', 'bias', 'gradWeight', 'gradBias')
     self.lookup_tables[t] = self.lookup_table:clone('weight', 'gradWeight')
+	self.attmodels[t] = self.attmodel:clone('weight', 'gradWeight', 'bias', 'gradBias')
   end
 end
 
 
 function layer:getModulesList()
-  return {self.core, self.lookup_table, self.attmodel.core, self.attmodel.predict, self.attmodel.product, self.attmodel.combineSen}
+  return {self.core, self.lookup_table, self.attmodel.core, self.attmodel.predict, self.attmodel.product, self.attmodel.combineSen.lookup_table}
 end
 
 function layer:parameters()
@@ -103,13 +106,19 @@ function layer:parameters()
   local params = {}
   for k,v in pairs(p1) do table.insert(params, v) end
   for k,v in pairs(p2) do table.insert(params, v) end
+  --print(#params)
   if self.finetune_att then for k,v in pairs(p3) do table.insert(params, v) end end
 
 
   local grad_params = {}
   for k,v in pairs(g1) do table.insert(grad_params, v) end
   for k,v in pairs(g2) do table.insert(grad_params, v) end
-  if self.finetune_att then for k,v in pairs(g3) do table.insert(grad_params, v) end end
+  --print(#grad_params)
+  if self.finetune_att then
+	for k,v in pairs(g3) do
+		table.insert(grad_params, v)
+	end
+  end
 
 
   -- todo: invalidate self.clones if params were requested?
@@ -123,14 +132,14 @@ function layer:training()
   if self.clones == nil then self:createClones() end -- create these lazily if needed
   for k,v in pairs(self.clones) do v:training() end
   for k,v in pairs(self.lookup_tables) do v:training() end
-  self.attmodel:training()
+  for k,v in pairs(self.attmodels) do v:training() end
 end
 
 function layer:evaluate()
   if self.clones == nil then self:createClones() end -- create these lazily if needed
   for k,v in pairs(self.clones) do v:evaluate() end
   for k,v in pairs(self.lookup_tables) do v:evaluate() end
-  self.attmodel:evaluate()
+  for k,v in pairs(self.attmodels) do v:evaluate() end
 end
 
 --[[
@@ -206,6 +215,7 @@ function layer:sample(imgs, opt)
 		att_output = self.attmodel:forward({imgs[1], imgs[2], subseq:sub(1,t-1):t()})
 	else
 		att_output[1] = imgs[1]
+		att_output[2] = torch.CudaTensor(batch_size, self.vocab_size+1):zero()
 	end
 
 
@@ -214,14 +224,11 @@ function layer:sample(imgs, opt)
     inputs = {xt}
 	table.insert(inputs, state[1])
 	table.insert(inputs, att_output[1])
+	table.insert(inputs, att_output[2])
 
     local out = self.core:forward(inputs)
     logprobs = out[self.num_state+1] -- last element is the output vector
     state = {}
-
-	if t>1 then
-		logprobs_att = self.LogSoftMax:forward(att_output[2])
-	end
     for i=1,self.num_state do table.insert(state, out[i]) end
 
   end
@@ -455,9 +462,10 @@ function layer:updateOutput(input)
 	  local att_output = {}
 
 	  if t > 1 then
-		att_output = self.attmodel:forward({input[1], input[2], self.subseq:sub(1,t-1):t()})
+		att_output = self.attmodels[t]:forward({input[1], input[2], self.subseq:sub(1,t-1):t()})
 	  else
 		att_output[1] = input[1]
+		att_output[2] = torch.FloatTensor(batch_size, self.vocab_size+1):zero():type(self._type)
 	  end
 
 
@@ -465,6 +473,9 @@ function layer:updateOutput(input)
 	  self.inputs[t] = {xt}
 	  table.insert(self.inputs[t], self.state[t-1][1])
 	  table.insert(self.inputs[t], att_output[1])
+	  table.insert(self.inputs[t], att_output[2])
+
+	  --if t>1 then print(self.inputs[2][3]:sub(1,5,1,5)) end
 
 	  --print(self.inputs[t])
 	  local out = self.clones[t]:forward(self.inputs[t])
@@ -483,12 +494,10 @@ end
 gradOutput is an (D+1)xNx(M+1) Tensor.
 --]]
 function layer:updateGradInput(input, gradOutput)
-  local dimgs -- grad on input images
+  local dimgs, dimgs_local -- grad on input images
 
   -- go backwards and lets compute gradients
   local dstate = {[self.tmax] = self.init_state} -- this works when init_state is all zeros
-  local dimg_local1, dimg_local2, doverall
-  local dgls = {}
   for t=self.tmax,1,-1 do
     -- concat state gradients and output vector gradients at time step t
     local dout = {}
@@ -501,19 +510,43 @@ function layer:updateGradInput(input, gradOutput)
     dstate[t-1] = {} -- copy over rest to state grad
 
 	assert(self.num_layers == 1)
-	for k=1,self.num_layers do
-		table.insert(dstate[t-1], dinputs[k*2])
-	end
+	table.insert(dstate[t-1], dinputs[2])
 
     -- continue backprop of xt
-	local it = self.lookup_tables_inputs[t]
-	if t>1 then self.lookup_tables[t]:backward(it, dxt) end-- backprop into lookup tab
+	if t>1 then
+		local it = self.lookup_tables_inputs[t]
+		self.lookup_tables[t]:backward(it, dxt)
+	end
 
+	--print(dimgs)
+
+	if self.finetune_att and t>1 then
+		--print(11111111111111111)
+		local grad = self.attmodels[t]:backward({input[1], input[2], self.subseq:sub(1,t-1):t()}, {dinputs[3], dinputs[4]})
+		if t == self.tmax then
+			dimgs = grad[1]
+			dimgs_local = grad[2]
+		else
+			dimgs:add(grad[1])
+			dimgs_local:add(grad[2])
+		end
+	end
+
+	if self.finetune_att and t==1 then
+		dimgs:add(dxt)
+		dimgs:add(dinputs[3])
+	end
+	-- backprop into lookup tab
  end
-
-
+ self.gradInput = {}
+ if self.finetune_att then
+	table.insert(self.gradInput, dimgs)
+	table.insert(self.gradInput, dimgs_local)
+ else
+	self.gradInput = {torch.Tensor(), torch.Tensor()}
+ end
+ table.insert(self.gradInput, torch.Tensor)
   -- we have gradient on image, but for LongTensor gt sequence we only create an empty tensor - can't backprop
-  self.gradInput = {torch.Tensor(), torch.Tensor(), torch.Tensor()}
   return self.gradInput
 end
 

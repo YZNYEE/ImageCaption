@@ -110,11 +110,8 @@ if string.len(opt.start_from) > 0 then
   for k,v in pairs(am_modules) do net_utils.unsanitize_gradients(v) end
   opt.seq_length = loader:getSeqLength()
   protos.crit = nn.AttDisCriterion(opt) -- not in checkpoints, create manually
-
-  local cnn_backend = opt.backend
-  if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
-  local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
-  protos.cnn_part = cnn_utils.build_cnn(cnn_raw, {encoding_size = opt.encoding_size, backend = cnn_backend})
+  protos.expand = nn.FeatExpander(opt.seq_per_img)
+  protos.expand3 = nn.FeatExpander_3d(opt.seq_per_img)
 
 else
   -- create protos from scratch
@@ -143,21 +140,19 @@ else
   local cnn_backend = opt.backend
   if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
   local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
-  protos.cnn_part = cnn_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
 
-  -- criterion for the language model
+  protos.cnn = cnn_utils.build_cnn_total(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
+
+  protos.expand = nn.FeatExpander(opt.seq_per_img)
+  protos.expand3 = nn.FeatExpander_3d(opt.seq_per_img)
+
+  -- criterion for the Attention model
   protos.crit = nn.AttDisCriterion(amOpt)
 end
 
 if opt.gpuid >= 0 then
   for k,v in pairs(protos) do
-	if v == protos.cnn_part then
-		for k,v in pairs(v) do
-			v:cuda()
-		end
-	else
 		v:cuda()
-	end
   end
 end
 
@@ -262,8 +257,8 @@ local iter = 0
 local function lossFun()
 
   protos.am:training()
-  for i=1,40 do
-	protos.cnn_part[i]:training()
+  for k,v in pairs(protos.cnn_part) do
+	v:training()
   end
 
   grad_params:zero()
@@ -345,7 +340,7 @@ while true do
     local checkpoint = {}
     checkpoint.opt = opt
     checkpoint.iter = iter
-    checkpoint.loss_history = loss_history
+    --checkpoint.loss_history = loss_history
     checkpoint.val_loss_history = val_loss_history
     --save these too for CIDEr/METEOR/etc eval
     --checkpoint.val_lang_stats_history = val_lang_stats_history
@@ -365,7 +360,7 @@ while true do
         checkpoint.protos = save_protos
         -- also include the vocabulary mapping so that we can use the checkpoint
         -- alone to run on arbitrary images without the data loader
-        --checkpoint.vocab = loader:getVocab()
+        checkpoint.vocab = loader:getVocab()
         torch.save(checkpoint_path .. '.t7', checkpoint)
         print('wrote checkpoint to ' .. checkpoint_path .. '.t7')
       end

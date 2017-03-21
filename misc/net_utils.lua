@@ -107,6 +107,41 @@ function layer:updateGradInput(input, gradOutput)
   return self.gradInput
 end
 
+
+local expand3, parent = torch.class('nn.FeatExpander_3d', 'nn.Module')
+function expand3:__init(n)
+  parent.__init(self)
+  self.n = n
+end
+
+function expand3:updateOutput(input)
+  if self.n == 1 then self.output = input; return self.output end -- act as a noop for efficiency
+  -- simply expands out the features. Performs a copy information
+  assert(input:nDimension() == 3)
+  local d = input:size(2)
+  local l = input:size(3)
+  self.output:resize(input:size(1)*self.n, d, l)
+  for k=1,input:size(1) do
+    local j = (k-1)*self.n+1
+    self.output[{ {j,j+self.n-1} }] = input[{ {k,k}, {} ,{}}]:expand(self.n, d, l) -- copy over
+  end
+  return self.output
+end
+function expand3:updateGradInput(input, gradOutput)
+  if self.n == 1 then self.gradInput = gradOutput; return self.gradInput end -- act as noop for efficiency
+  -- add up the gradients for each block of expanded features
+  self.gradInput:resizeAs(input)
+  local d = input:size(2)
+  for k=1,input:size(1) do
+    local j = (k-1)*self.n+1
+    self.gradInput[k] = torch.sum(gradOutput[{ {j,j+self.n-1} }], 1)
+  end
+  return self.gradInput
+end
+
+
+
+
 function net_utils.list_nngraph_modules(g)
   local omg = {}
   for i,node in ipairs(g.forwardnodes) do

@@ -237,17 +237,18 @@ local function checkgrad()
 
 	local dtype = 'torch.DoubleTensor'
 	local opt = {}
-    opt.vocab_size = 10000
-	opt.encoding_size = 4
-    opt.rnn_size = 3
+    opt.vocab_size = 24
+	opt.encoding_size = 14
+    opt.rnn_size = 13
     opt.dropout = 0
     opt.seq_length = 7
-    opt.batch_size = 80
+    opt.batch_size = 5
 	opt.local_img_num = 2
 	opt.get_top_num = 1
+	opt.stack_num = 1
 
-	local am = nn.AttentionModel(opt)
-    local crit = nn.AttDisCriterion(opt)
+	local am = nn.AttentionModel(opt):type(dtype)
+    local crit = nn.AttDisCriterion(opt):type(dtype)
 
     -- construct some input to feed in
     local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
@@ -342,13 +343,15 @@ end
 
 local function checkgrad_crit()
 
+	local dtype = 'torch.DoubleTensor'
+
 	local opt = {}
 	opt.batch_size = 5
 	opt.vocab_size = 6
 	opt.seq_length = 8
 
-	local crit_dis = nn.AttDisCriterion()
-	local input = torch.randn(opt.batch_size, opt.vocab_size+1)
+	local crit_dis = nn.AttDisCriterion():type(dtype)
+	local input = torch.randn(opt.batch_size, opt.vocab_size+1):type(dtype)
 	local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
 	seq[{{3,4},1}]=0
 	seq[{{3,6},3}]=0
@@ -388,9 +391,10 @@ local function overfit()
     opt.batch_size = 6
 	opt.local_img_num = 10
 	opt.get_top_num = 1
+	opt.stack_num = 1
 
-	local am = nn.AttentionModel(opt)
-    local crit = nn.AttDisCriterion(opt)
+	local am = nn.AttentionModel(opt):type(dtype)
+    local crit = nn.AttDisCriterion(opt):type(dtype)
 
     -- construct some input to feed in
     local seq = torch.LongTensor(opt.seq_length, opt.batch_size):random(opt.vocab_size)
