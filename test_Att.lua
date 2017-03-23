@@ -185,48 +185,45 @@ local function checkgrad_AM()
     local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.encoding_size):type(dtype)
     local img_o = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
 
+	local w =torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
+	local w_other = torch.randn(opt.batch_size, opt.vocab_size+1):type(dtype)
+	local dgrad_cnn
+	local losssum = 0
+
 	for i=1,opt.seq_length do
 
 		print(' testing '..i..'th seq')
 
 		local input = {img_o, img_l1, exseq:sub(1,i):t()}
 		local output = am:forward(input)
-		local w = torch.randn(opt.batch_size, opt.vocab_size+1):type(dtype)
-		local w_other = torch.randn(opt.batch_size, opt.vocab_size+1):type(dtype)
 
 		local loss1 = torch.sum(torch.cmul(w, output[1]))
-		local loss2 = torch.sum(torch.cmul(w, output[2]))
-		local losssum = loss1 + loss2
-		local gradOutput = w
-		local gradInput = am:backward(input, {gradOutput, gradOutput})
+		local loss2 = torch.sum(torch.cmul(w_other, output[2]))
+		losssum = losssum + loss1 + loss2
 
-		local function f(x)
-
-			local output = am:forward({img_o, x, exseq:sub(1,i):t()})
-			local loss1 = torch.sum(torch.cmul(w, output[1]))
-			local loss2 = torch.sum(torch.cmul(w, output[2]))
-			local losssum = loss1 + loss2
-			return losssum
-
+		local grad = am:backward(input, {w, w_other})
+		if dgrad_cnn == nil then
+			dgrad_cnn = {}
+			dgrad_cnn[1] = dgrad[1]:clone()
+			dgrad_cnn[2] = dgrad[2]:clone()
+		else
+			dgrad_cnn[1]:add(dgrad[1])
+			dgrad_cnn[2]:add(dgrad[2])
 		end
 
-		local gradInput_num = gradcheck.numeric_gradient(f, img_l1, 1, 1e-6)
-		tester:assertTensorEq(gradInput[2], gradInput_num, 1e-4)
-		tester:assertlt(gradcheck.relative_error(gradInput[2], gradInput_num, 1e-8), 1e-4)
+	end
 
-		local function f1(x)
+	local function f(x)
 
-			local output = am:forward({x, img_l1, exseq:sub(1,i):t()})
+		local loss = 0
+		for i=1,opt.seq_length do
+
+			local input = {x, img_l1, exseq:sub(1,i):t()}
+			local output = am:forward(input)
 			local loss1 = torch.sum(torch.cmul(w, output[1]))
-			local loss2 = torch.sum(torch.cmul(w, output[2]))
-			local losssum = loss1 + loss2
-			return losssum
+			local loss2 = torch.sum(torch.cmul(w_other, output[2]))
 
 		end
-
-		local gradInput_num1 = gradcheck.numeric_gradient(f1, img_o, 1, 1e-6)
-		tester:assertTensorEq(gradInput[1], gradInput_num1, 1e-4)
-		tester:assertlt(gradcheck.relative_error(gradInput[1], gradInput_num1, 1e-8), 1e-4)
 
 	end
 
@@ -245,7 +242,7 @@ local function checkgrad()
     opt.batch_size = 5
 	opt.local_img_num = 2
 	opt.get_top_num = 1
-	opt.stack_num = 1
+	opt.stack_num = 2
 
 	local am = nn.AttentionModel(opt):type(dtype)
     local crit = nn.AttDisCriterion(opt):type(dtype)
@@ -271,73 +268,46 @@ local function checkgrad()
 
     local img_l1 = torch.randn(opt.batch_size, opt.local_img_num, opt.encoding_size):type(dtype)
     local img_o = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
-	--local sentence = torch.randn(opt.batch_size, opt.encoding_size):type(dtype)
 
-	--local true_target = torch.LongTensor(opt.batch_size):zero()
+	local losssum = 0
+	local dgrad_cnn
+	local flag = true
+
 	for i=1,opt.seq_length do
 
 		print(' testing '..i..'th seq')
-
-		--local input = {img_o, img_l1, exseq:sub(1,i):t()}
 		local input = {img_o, img_l1, exseq:sub(1,i):t()}
 		local output = am:forward(input)
-
-		-- crit module will change target's value, so save target is must in the gradcheck
-		local target = true_target
 		local loss = crit:forward({output[2], i}, seq)
-		-- true_target = crit.target:clone()
-
 		local gradOutput = crit:backward({output[2], i}, seq)
-		-- print(gradOutput[1])
-
 		local gradInput = am:backward(input, {torch.zeros(opt.batch_size, opt.rnn_size), gradOutput})
-		-- print(gradInput[1])
-
-		local function f(x)
-
-			--crit.target:copy(target)
-			local input = {img_o, x, exseq:sub(1,i):t()}
-			local output = am:forward(input)
-			local loss = crit:forward({output[2], i}, seq)
-			return loss
-
+		if dgrad_cnn == nil then
+			dgrad_cnn = gradInput[1]:clone()
+		else
+			dgrad_cnn:add(gradInput[1])
 		end
 
-		local gradInput_num = gradcheck.numeric_gradient(f, img_l1, 1, 1e-6)
-		tester:assertTensorEq(gradInput[2], gradInput_num, 1e-4)
-		tester:assertlt(gradcheck.relative_error(gradInput[2], gradInput_num, 1e-8), 1e-4)
+	end
 
-		local function f1(x)
+	local function f(x)
 
-			--crit.target:copy(target)
+		local losssum = 0
+		for i=1,opt.seq_length do
 			local input = {x, img_l1, exseq:sub(1,i):t()}
 			local output = am:forward(input)
 			local loss = crit:forward({output[2], i}, seq)
-			return loss
-
+			losssum = losssum + loss
 		end
+		return losssum
 
-		local gradInput_num1 = gradcheck.numeric_gradient(f1, img_o, 1, 1e-6)
-		tester:assertTensorEq(gradInput[1], gradInput_num1, 1e-4)
-		tester:assertlt(gradcheck.relative_error(gradInput[1], gradInput_num1, 1e-8), 1e-4)
-
-		local function f2(x)
-
-			crit.target:copy(target)
-			local input = {img_o, img_l1, x}
-			local output = am:forward(input)
-			local loss = crit:forward(output[2], seq:sub(1,i))
-			return loss
-
-		end
-
-		-- local gradInput_num1 = gradcheck.numeric_gradient(f2, sentence, 1, 1e-6)
-		-- tester:assertTensorEq(gradInput[3], gradInput_num1, 1e-4)
-		-- tester:assertlt(gradcheck.relative_error(gradInput[3], gradInput_num1, 1e-8), 1e-4)
-
-		--print(gradInput_num1)
-		--print(gradInput[1])
 	end
+	print(dgrad_cnn)
+
+	local gradInput_num = gradcheck.numeric_gradient(f, img_o, 1, 1e-6)
+	tester:assertTensorEq(dgrad_cnn, gradInput_num, 1e-4)
+	tester:assertlt(gradcheck.relative_error(dgrad_cnn, gradInput_num, 1e-8), 1e-4)
+	print(gradInput_num)
+
 
 end
 

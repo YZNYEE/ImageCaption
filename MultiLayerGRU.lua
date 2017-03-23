@@ -58,6 +58,7 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
 
 
   local input_prob = inputs[#inputs]
+  input_prob = nn.ReLU(input_prob)
   if dropout > 0 then input_prob = nn.Dropout(dropout)(input_prob):annotate{name='input_prob'} end
   input_prob = nn.Linear(output_size, rnn_size)(input_prob)
   input_prob = nn.Tanh()(input_prob)

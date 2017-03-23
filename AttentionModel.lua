@@ -87,7 +87,7 @@ end
 function layer:evaluate()
 
 	if self.clones == nil or self.predicts == nil then self:createClones() end
-	assert( #self.clones == 2)
+	assert( #self.clones == self.stack_num*2)
 
 	self.combineSen.lookup_table:evaluate()
 	self.product:evaluate()
@@ -341,6 +341,8 @@ function crit_dis:reset(MP1)
 	else
 		self.flag = torch.LongTensor(MP1):zero()
 		self.used = torch.LongTensor(MP1):zero()
+		--self.grad = torch.Tensor(MP1):zero()
+		--self.exscore = torch.Tensor(MP1):zero()
 		self.grad = torch.CudaTensor(MP1):zero()
 		self.exscore = torch.CudaTensor(MP1):zero()
 	end
@@ -419,8 +421,8 @@ function crit_dis:updateOutput(inputs, seq)
 		end
 
 	end
-	self.output = loss/(n*MP1)
-	self.gradInput:div(n*MP1)
+	if n ~= 0 then self.output = loss/(n*MP1) end
+	if n ~= 0 then self.gradInput:div(n*MP1) end
 	return self.output
 
 end

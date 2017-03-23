@@ -32,6 +32,7 @@ cmd:option('-start_from', '', 'path to a model checkpoint to initialize model we
 
 cmd:option('-rnn_size',512,'size of the rnn in number of hidden nodes in each layer')
 cmd:option('-encoding_size',512,'the encoding size of each token in the vocabulary, and the image.')
+cmd:option('-stack_num',1,'the num of stack for attmodel')
 
 cmd:option('-max_iters', -1, 'max number of iterations to run for (-1 = run forever)')
 cmd:option('-batch_size',16,'what is the batch size in number of images per batch? (there will be x seq_per_img sentences)')
@@ -105,7 +106,7 @@ if string.len(opt.start_from) > 0 then
   print('initializing weights from ' .. opt.start_from)
   local loaded_checkpoint = torch.load(opt.start_from)
   protos = loaded_checkpoint.protos
-  -- net_utils.unsanitize_gradients(protos.cnn)
+  net_utils.unsanitize_gradients(protos.cnn)
   local am_modules = protos.am:getModulesList()
   for k,v in pairs(am_modules) do net_utils.unsanitize_gradients(v) end
   opt.seq_length = loader:getSeqLength()
@@ -129,6 +130,7 @@ else
   --lmOpt.local_img_num = 14*14
   amOpt.num_of_local_img = opt.num_of_local_img
   amOpt.feature_table = {}
+  amOpt.stack_num = opt.stack_num
 
   for i=1,string.len(opt.index_of_feature),2 do
 	  local num = string.sub(opt.index_of_feature, i, i+1)
@@ -165,15 +167,19 @@ end
 print(protos.feature_table)
 
 local params, grad_params = protos.am:getParameters()
+local cnn_params, cnn_grad_params = protos.cnn:getParameters()
+--返回元素的数量
 print('total number of parameters in LM: ', params:nElement())
-assert(params:nElement() == grad_params:nElement())
+print('total number of parameters in CNN: ', cnn_params:nElement())
 
 local thin_am = protos.am:clone()
 thin_am.core:share(protos.am.core, 'weight', 'bias') -- TODO: we are assuming that LM has specific members! figure out clean way to get rid of, not modular.
 thin_am.predict:share(protos.am.predict, 'weight', 'bias')
 thin_am.combineSen.lookup_table:share(protos.am.combineSen.lookup_table, 'weight', 'bias')
 thin_am.product:share(protos.am.product, 'weight', 'bias')
+local thin_cnn = protos.cnn:clone('weight', 'bias')
 
+net_utils.sanitize_gradients(thin_cnn)
 local am_modules = thin_am:getModulesList()
 for k,v in pairs(am_modules) do net_utils.sanitize_gradients(v) end
 
@@ -194,11 +200,8 @@ local function eval_split(split, evalopt)
   local verbose = utils.getopt(evalopt, 'verbose', true)
   local val_images_use = utils.getopt(evalopt, 'val_images_use', true)
 
-  --protos.cnn:evaluate()
+  protos.cnn:evaluate()
   protos.am:evaluate()
-  for k,v in pairs(protos.cnn_part) do
-	v:evaluate()
-  end
 
   loader:resetIterator(split) -- rewind iteator back to first datapoint in the split
   local n = 0
@@ -212,23 +215,37 @@ local function eval_split(split, evalopt)
     n = n + data.images:size(1)
 
     -- forward the model to get loss
-    local feats = cnn_utils.forward(protos.cnn_part, protos.feature_table , data.images)
-	local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
+	local feats = protos.cnn:forward(data.images)
+	local expanded_feats = {}
+	--print(feats)
+	expanded_feats[1] = protos.expand:forward(feats[1], opt.seq_per_img)
+	expanded_feats[2] = protos.expand3:forward(feats[2], opt.seq_per_img):transpose(2,3)
 
 	local seq = data.labels
 	exseq:sub(2,protos.am.seq_length+1):copy(seq)
 	local texseq = exseq:t()
 
 	local loss_it = 0
+	local flag = true
 
 	for i=1,protos.am.seq_length do
 
-		local input = {unpack(expanded_feats)}
-		table.insert(input, texseq:sub(1,opt.batch_size * opt.seq_per_img,1,i))
-		local logprobs = protos.am:forward(input)
-		local loss = protos.crit:forward({logprobs[2], i}, seq)
-		loss_it = loss_it + loss
-		loss_evals = loss_evals + 1
+		if i>1 then
+			local sum = torch.sum(seq:sub(i-1, i-1))
+			if sum == 0 then flag = false end
+		end
+
+		-- if value of sum is zero, it exclaim that all seq is terminated.
+		if flag then
+
+			local input = {unpack(expanded_feats)}
+			table.insert(input, texseq:sub(1,opt.batch_size * opt.seq_per_img,1,i))
+			local logprobs = protos.am:forward(input)
+			local loss = protos.crit:forward({logprobs[2], i}, seq)
+			loss_it = loss_it + loss
+			loss_evals = loss_evals + 1
+
+		end
 
 	end
 
@@ -256,10 +273,8 @@ local iter = 0
 
 local function lossFun()
 
+  protos.cnn:training()
   protos.am:training()
-  for k,v in pairs(protos.cnn_part) do
-	v:training()
-  end
 
   grad_params:zero()
   -----------------------------------------------------------------------------
@@ -272,8 +287,12 @@ local function lossFun()
   -- data.seq: LxM where L is sequence length upper bound, and M = N*seq_per_img
 
   -- forward the ConvNet on images (most work happens here)
-  local feats = cnn_utils.forward(protos.cnn_part, protos.feature_table , data.images)
-  local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
+  local feats = protos.cnn:forward(data.images)
+  local expanded_feats = {}
+  --print(feats)
+  expanded_feats[1] = protos.expand:forward(feats[1], opt.seq_per_img)
+  expanded_feats[2] = protos.expand3:forward(feats[2], opt.seq_per_img):transpose(2,3)
+  --print(expanded_feats)
   -- we have to expand out image features, once for each sentence
   -- forward the attention model
 
@@ -282,23 +301,53 @@ local function lossFun()
   local texseq = exseq:t()
 
   local losssum = 0
+  local dgrad_cnn
+  local flag = true
+
   for i=1, protos.am.seq_length do
 
-	local input = {unpack(expanded_feats)}
-	table.insert(input, texseq:sub(1,opt.batch_size * opt.seq_per_img,1,i))
-	local logprobs = protos.am:forward(input)
-	local loss = protos.crit:forward({logprobs[2], i}, seq)
-	losssum = losssum + loss
-	-----------------------------------------------------------------------------
-	-- Backward pass
-	-----------------------------------------------------------------------------
-	-- backprop criterion
-	local dlogprobs = protos.crit:backward({logprobs[2], i}, seq)
-	-- backprop language model
-	local dgrad= protos.am:backward(input, {empty, dlogprobs})
-	-- backprop the CNN, but only if we are finetuning
+	--print(flag)
+	if i>1 and flag then
+		local sum = torch.sum(seq:sub(i-1, i-1))
+		--print(seq:sub(i-1,i-1))
+		if sum == 0 then flag = false end
+	end
+
+	if flag then
+
+		local input = {unpack(expanded_feats)}
+		table.insert(input, texseq:sub(1,opt.batch_size * opt.seq_per_img,1,i))
+		local logprobs = protos.am:forward(input)
+		local loss = protos.crit:forward({logprobs[2], i}, seq)
+		losssum = losssum + loss
+		-----------------------------------------------------------------------------
+		-- Backward pass
+		-----------------------------------------------------------------------------
+		-- backprop criterion
+		local dlogprobs = protos.crit:backward({logprobs[2], i}, seq)
+		-- backprop language model
+		local dgrad= protos.am:backward(input, {empty, dlogprobs})
+		if dgrad_cnn == nil then
+			dgrad_cnn = {}
+			dgrad_cnn[1] = dgrad[1]:clone()
+			dgrad_cnn[2] = dgrad[2]:clone()
+		else
+			dgrad_cnn[1]:add(dgrad[1])
+			dgrad_cnn[2]:add(dgrad[2])
+		end
+    end
 
  end
+
+  if opt.finetune_cnn_after >= 0 and iter >= opt.finetune_cnn_after and dgrad_cnn then
+    local dfeats = {}
+	--print(dgrad_cnn)
+	dfeats[1] = protos.expand:backward(feats[1], dgrad_cnn[1])
+    dfeats[2] = protos.expand3:backward(feats[2], dgrad_cnn[2]:transpose(2,3))
+	--print(dfeats)
+	local dx = protos.cnn:backward(data.images, dfeats)
+  end
+
  losssum = losssum/protos.am.seq_length
   -- clip gradients
   -- print(string.format('claming %f%% of gradients', 100*torch.mean(torch.gt(torch.abs(grad_params), opt.grad_clip))))
@@ -306,6 +355,11 @@ local function lossFun()
 
   -- apply L2 regularization
   -----------------------------------------------------------------------------
+  if opt.cnn_weight_decay > 0 then
+    cnn_grad_params:add(opt.cnn_weight_decay, cnn_params)
+    -- note: we don't bother adding the l2 loss to the total loss, meh.
+    cnn_grad_params:clamp(-opt.grad_clip, opt.grad_clip)
+  end
 
   -- and lets get out!
   local losses = { total_loss = losssum }
@@ -357,6 +411,7 @@ while true do
         local save_protos = {}
         print('best_score : '..best_score)
 		save_protos.am = thin_am -- these are shared clones, and point to correct param storage
+		save_protos.cnn = thin_cnn
         checkpoint.protos = save_protos
         -- also include the vocabulary mapping so that we can use the checkpoint
         -- alone to run on arbitrary images without the data loader

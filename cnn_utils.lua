@@ -87,10 +87,10 @@ function cnn_utils.build_cnn_total(cnn, opt)
   cnn_tail:add(backend.ReLU(true))
 
   cnn_concat:add(cnn_tail)
-  cnn_concat:add(nn.Identity())
+  cnn_concat:add(nn.Reshape(512,196))
   cnn_head:add(cnn_concat)
 
-  assert(#cnn_part == 38+2, 'layers of cnn is wrong')
+  --assert(#cnn_part == 38+2, 'layers of cnn is wrong')
   return cnn_head
 
 end
