@@ -7,7 +7,7 @@ require 'torch'
 
 local MLGRU = {}
 
-function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
+function MLGRU.mlgru(input_size, output_size, g_size, rnn_size, n, dropout)
   dropout = dropout or 0
 
   local inputs = {}
@@ -39,14 +39,14 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
     if L == 1 then input_size_L = input_size else input_size_L = rnn_size end
     -- GRU tick
     -- forward the update and reset gates
-    local update_gate = nn.Sigmoid()(new_input_sum(input_size_L, input_size, x, prev_h, img))
-    local reset_gate = nn.Sigmoid()(new_input_sum(input_size_L, input_size, x, prev_h, img))
+    local update_gate = nn.Sigmoid()(new_input_sum(input_size_L, g_size, x, prev_h, img))
+    local reset_gate = nn.Sigmoid()(new_input_sum(input_size_L, g_size, x, prev_h, img))
     -- compute candidate hidden state
     local gated_hidden = nn.CMulTable()({reset_gate, prev_h})
     local p2 = nn.Linear(rnn_size, rnn_size)(gated_hidden)
     local p1 = nn.Linear(input_size_L, rnn_size)(x)
 	-- compute information given by img
-	local p3 = nn.Linear(input_size, rnn_size)(img)
+	local p3 = nn.Linear(g_size, rnn_size)(img)
 
     local hidden_candidate = nn.Tanh()(nn.CAddTable()({p1,p2,p3}))
     -- compute new interpolated hidden state, based on the update gate
@@ -58,7 +58,7 @@ function MLGRU.mlgru(input_size, output_size, rnn_size, n, dropout)
 
 
   local input_prob = inputs[#inputs]
-  input_prob = nn.ReLU(input_prob)
+  input_prob = nn.ReLU(true)(input_prob)
   if dropout > 0 then input_prob = nn.Dropout(dropout)(input_prob):annotate{name='input_prob'} end
   input_prob = nn.Linear(output_size, rnn_size)(input_prob)
   input_prob = nn.Tanh()(input_prob)

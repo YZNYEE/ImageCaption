@@ -33,6 +33,7 @@ cmd:option('-finetune_att',false,'')
 -- Model settings
 cmd:option('-rnn_size',512,'size of the rnn in number of hidden nodes in each layer')
 cmd:option('-input_encoding_size',512,'the encoding size of each token in the vocabulary, and the image.')
+cmd:option('-stack_num',1,'the num of stacking')
 
 -- Optimization: General
 cmd:option('-max_iters', -1, 'max number of iterations to run for (-1 = run forever)')
@@ -114,16 +115,15 @@ if string.len(opt.start_from) > 0 then
   local lm_modules = protos.lm:getModulesList()
   protos.crit = nn.LanguageModelCriterion() -- not in checkpoints, create manually
   --protos.lm:loadattmodel()
-  protos.lm.attmodel:createMax()
-  protos.lm.attmodel.stack_num = 1
+  --protos.lm.attmodel:createMax()
   for k,v in pairs(lm_modules) do net_utils.unsanitize_gradients(v) end
   protos.lm.attmodel:createClones()
-  --print(123456789)
+  protos.expand = nn.FeatExpander(opt.seq_per_img)
+  protos.expand3 = nn.FeatExpander_3d(opt.seq_per_img)
 
-  local cnn_backend = opt.backend
-  if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
-  local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
-  protos.cnn_part = cnn_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
+  local pp = torch.load(opt.attmodel_path)
+  protos.cnn = pp.protos.cnn
+  --print(123456789)
 
 else
   -- create protos from scratch
@@ -144,7 +144,8 @@ else
 
   lmOpt.attmodel_path = opt.attmodel_path
   lmOpt.finetune_att = opt.finetune_att
-  lmOpt.stack_num = 1
+  lmOpt.stack_num = opt.stack_num
+  lmOpt.g_size = 1000
 
   lmOpt.feature_table = {}
 
@@ -155,15 +156,15 @@ else
 
   protos.lm = nn.LanguageModel(lmOpt)
   -- initialize the ConvNet
-  local cnn_backend = opt.backend
-  if opt.gpuid == -1 then cnn_backend = 'nn' end -- override to nn if gpu is disabled
-  local cnn_raw = loadcaffe.load(opt.cnn_proto, opt.cnn_model, cnn_backend)
-  protos.cnn_part = cnn_utils.build_cnn(cnn_raw, {encoding_size = opt.input_encoding_size, backend = cnn_backend})
+  pp = torch.load(opt.attmodel_path)
+  protos.lm.attmodel = pp.protos.am
+  protos.cnn = pp.protos.cnn
 
   -- initialize a special FeatExpander module that "corrects" for the batch number discrepancy
   -- where we have multiple captions per one image in a batch. This is done for efficiency
   -- because doing a CNN forward pass is expensive. We expand out the CNN features for each sentence
-  protos.expander = nn.FeatExpander(opt.seq_per_img)
+  protos.expand = nn.FeatExpander(opt.seq_per_img)
+  protos.expand3 = nn.FeatExpander_3d(opt.seq_per_img)
   -- criterion for the language model
   protos.crit = nn.LanguageModelCriterion()
 end
@@ -171,13 +172,7 @@ end
 -- ship everything to GPU, maybe
 if opt.gpuid >= 0 then
   for k,v in pairs(protos) do
-	if v == protos.cnn_part then
-		for k,v in pairs(v) do
-			v:cuda()
-		end
-	else
-		v:cuda()
-	end
+	v:cuda()
   end
 end
 
@@ -213,7 +208,7 @@ thin_lm.attmodel.predict:share(protos.lm.attmodel.predict, 'weight', 'bias')
 thin_lm.attmodel.product:share(protos.lm.attmodel.product, 'weight', 'bias')
 thin_lm.attmodel.core:share(protos.lm.attmodel.core, 'weight', 'bias')
 
--- local thin_cnn = protos.cnn:clone('weight', 'bias')
+local thin_cnn = protos.cnn:clone('weight', 'bias')
 -- sanitize all modules of gradient storage so that we dont save big checkpoints
 -- net_utils.sanitize_gradients(thin_cnn)
 local lm_modules = thin_lm:getModulesList()
@@ -234,9 +229,7 @@ local function eval_split(split, evalopt)
 
   --protos.cnn:evaluate()
   protos.lm:evaluate()
-  for k,v in pairs(protos.cnn_part) do
-	v:evaluate()
-  end
+  protos.cnn:evaluate()
 
   loader:resetIterator(split) -- rewind iteator back to first datapoint in the split
   local n = 0
@@ -252,8 +245,11 @@ local function eval_split(split, evalopt)
     n = n + data.images:size(1)
 
     -- forward the model to get loss
-    local feats = cnn_utils.forward(protos.cnn_part, protos.feature_table , data.images)
-	local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
+	local feats = protos.cnn:forward(data.images)
+	local expanded_feats = {}
+	--print(feats)
+	expanded_feats[1] = protos.expand:forward(feats[1], opt.seq_per_img)
+	expanded_feats[2] = protos.expand3:forward(feats[2], opt.seq_per_img):transpose(2,3)
 --    local expanded_feats = protos.expander:forward(feats)
 	table.insert(expanded_feats, data.labels)
     local logprobs = protos.lm:forward(expanded_feats)
@@ -263,6 +259,7 @@ local function eval_split(split, evalopt)
     loss_evals = loss_evals + 1
 
     -- forward the model to also get generated samples for each image
+	feats[2] = feats[2]:transpose(2,3)
     local seq = protos.lm:sample(feats)
     local sents = net_utils.decode_sequence(vocab, seq)
     for k=1,#sents do
@@ -300,9 +297,7 @@ local iter = 0
 
 local function lossFun()
   protos.lm:training()
-  for k,v in pairs(protos.cnn_part) do
-	v:training()
-  end
+  protos.cnn:training()
 
 
   grad_params:zero()
@@ -320,9 +315,12 @@ local function lossFun()
   -- data.seq: LxM where L is sequence length upper bound, and M = N*seq_per_img
 
   -- forward the ConvNet on images (most work happens here)
-  local feats = cnn_utils.forward(protos.cnn_part, protos.feature_table , data.images)
-  local expanded_feats = cnn_utils.expand(feats, opt.seq_per_img)
--- we have to expand out image features, once for each sentence
+  local feats = protos.cnn:forward(data.images)
+  local expanded_feats = {}
+  --print(feats)
+  expanded_feats[1] = protos.expand:forward(feats[1], opt.seq_per_img)
+  expanded_feats[2] = protos.expand3:forward(feats[2], opt.seq_per_img):transpose(2,3)
+  -- we have to expand out image features, once for each sentence
   -- forward the language model
   table.insert(expanded_feats, data.labels)
   local logprobs = protos.lm:forward(expanded_feats)
@@ -421,7 +419,7 @@ while true do
         local save_protos = {}
         print('best_score : '..best_score)
 		save_protos.lm = thin_lm -- these are shared clones, and point to correct param storage
-        save_protos.cnn_part = thin_cnn_part
+        save_protos.cnn = thin_cnn
 
         checkpoint.protos = save_protos
         -- also include the vocabulary mapping so that we can use the checkpoint

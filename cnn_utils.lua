@@ -1,6 +1,6 @@
 require 'hdf5'
 local utils = require 'misc.utils'
-require'misc.DataLoader'
+require'misc.DataLoadernew'
 local cnn_utils = {}
 
 function cnn_utils.build_cnn(cnn, opt)

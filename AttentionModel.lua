@@ -370,7 +370,7 @@ function crit_dis:updateOutput(inputs, seq)
 
 		self:reset(MP1)
 
-		local tt = t+1
+		local tt = t
 		if tt > D then tt = D end
 		for j=t,tt do
 

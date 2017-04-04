@@ -22,11 +22,12 @@ function layer:__init(opt)
   self.rnn_size = utils.getopt(opt, 'rnn_size')
   self.num_of_local_img = utils.getopt(opt, 'num_of_local_img')
   self.num_layers = 1
+  self.g_size = utils.getopt(opt, 'g_size')
   local dropout = utils.getopt(opt, 'dropout', 0)
   -- options for Language Model
   self.seq_length = utils.getopt(opt, 'seq_length')
   -- create the core lstm network. note +1 for both the START and END tokens
-  self.core = MLGRU.mlgru(self.input_encoding_size, self.vocab_size + 1, self.rnn_size, self.num_layers, dropout)
+  self.core = MLGRU.mlgru(self.input_encoding_size, self.vocab_size + 1, self.g_size, self.rnn_size, self.num_layers, dropout)
   self.lookup_table = nn.LookupTable(self.vocab_size + 1, self.input_encoding_size)
   self:_createInitState(1) -- will be lazily resized later during forward passes
 
@@ -190,8 +191,6 @@ function layer:sample(imgs, opt)
         local prob_prev
         if temperature == 1.0 then
           prob_prev = torch.exp(logprobs) -- fetch prev distribution: shape Nx(M+1)
-		  local att_prob = torch.exp(logprobs_att)
-		  prob_prev = 0.7*prob_prev + 0.3*att_prob
         else
           -- scale logprobs by temperature
           prob_prev = torch.exp(torch.div(logprobs, temperature))
@@ -214,7 +213,7 @@ function layer:sample(imgs, opt)
 	if t > 1 then
 		att_output = self.attmodel:forward({imgs[1], imgs[2], subseq:sub(1,t-1):t()})
 	else
-		att_output[1] = imgs[1]
+		att_output[1] = torch.FloatTensor(batch_size, self.g_size):zero():type(self._type)
 		att_output[2] = torch.CudaTensor(batch_size, self.vocab_size+1):zero()
 	end
 
@@ -464,7 +463,7 @@ function layer:updateOutput(input)
 	  if t > 1 then
 		att_output = self.attmodels[t]:forward({input[1], input[2], self.subseq:sub(1,t-1):t()})
 	  else
-		att_output[1] = input[1]
+		att_output[1] = torch.FloatTensor(batch_size, self.g_size):zero():type(self._type)
 		att_output[2] = torch.FloatTensor(batch_size, self.vocab_size+1):zero():type(self._type)
 	  end
 

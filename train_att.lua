@@ -6,7 +6,7 @@ require 'nngraph'
 require 'loadcaffe'
 -- local imports
 local utils = require 'misc.utils'
-require 'misc.DataLoader'
+require 'misc.DataLoadernew'
 require 'AttentionModel'
 local net_utils = require 'misc.net_utils'
 local cnn_utils = require 'cnn_utils'
@@ -73,6 +73,7 @@ cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
 cmd:option('-num_of_local_img',1,'the number of local image feature')
 cmd:option('-index_of_feature',3040,'table contains index of images extracted ')
 cmd:option('-get_top_num',5,'number of local img chosen')
+cmd:option('-direction','forward','the direction of model')
 
 cmd:text()
 
@@ -221,7 +222,13 @@ local function eval_split(split, evalopt)
 	expanded_feats[1] = protos.expand:forward(feats[1], opt.seq_per_img)
 	expanded_feats[2] = protos.expand3:forward(feats[2], opt.seq_per_img):transpose(2,3)
 
-	local seq = data.labels
+	local seq
+	if opt.direction == 'forward' then seq = data.labels
+	else
+		assert(opt.direction == 'backward')
+		seq = data.labels_back
+	end
+
 	exseq:sub(2,protos.am.seq_length+1):copy(seq)
 	local texseq = exseq:t()
 
@@ -296,7 +303,12 @@ local function lossFun()
   -- we have to expand out image features, once for each sentence
   -- forward the attention model
 
-  local seq = data.labels
+  local seq
+  if opt.direction == 'forward' then seq = data.labels
+  else
+	assert(opt.direction == 'backward')
+	seq = data.labels_back
+  end
   exseq:sub(2,protos.am.seq_length+1):copy(seq)
   local texseq = exseq:t()
 
