@@ -5,7 +5,7 @@ require 'nngraph'
 require 'loadcaffe'
 -- local imports
 local utils = require 'misc.utils'
-require 'misc.DataLoader'
+require 'misc.DataLoadernew'
 require 'LanguageModel_addtiional'
 local net_utils = require 'misc.net_utils'
 local cnn_utils = require 'cnn_utils'
@@ -76,6 +76,7 @@ cmd:option('-gpuid', 0, 'which gpu to use. -1 = use CPU')
 cmd:option('-num_of_local_img',1,'the number of local image feature')
 cmd:option('-index_of_feature',40,'table contains index of images extracted ')
 cmd:option('-num_layers',1,'the number of GRUs layers ')
+cmd:option('-direction','forward','the direction of the model')
 
 cmd:text()
 
@@ -123,6 +124,9 @@ if string.len(opt.start_from) > 0 then
 
   local pp = torch.load(opt.attmodel_path)
   protos.cnn = pp.protos.cnn
+  if opt.finetune_att_after > 0 then
+	protos.lm.finetune_att = true
+  end
   --print(123456789)
 
 else
@@ -251,10 +255,18 @@ local function eval_split(split, evalopt)
 	expanded_feats[1] = protos.expand:forward(feats[1], opt.seq_per_img)
 	expanded_feats[2] = protos.expand3:forward(feats[2], opt.seq_per_img):transpose(2,3)
 --    local expanded_feats = protos.expander:forward(feats)
-	table.insert(expanded_feats, data.labels)
-    local logprobs = protos.lm:forward(expanded_feats)
+	local label
+	if opt.direction == 'forward' then
+		labels = data.labels
+    else
+		assert(opt.direction == 'backward')
+		labels = data.labels_back
+	end
+	table.insert(expanded_feats, labels)
+
+	local logprobs = protos.lm:forward(expanded_feats)
 	-- local logprobs = protos.lm:forward{expanded_feats, data.labels}
-    local loss = protos.crit:forward(logprobs, data.labels)
+    local loss = protos.crit:forward(logprobs, labels)
     loss_sum = loss_sum + loss
     loss_evals = loss_evals + 1
 
@@ -322,16 +334,23 @@ local function lossFun()
   expanded_feats[2] = protos.expand3:forward(feats[2], opt.seq_per_img):transpose(2,3)
   -- we have to expand out image features, once for each sentence
   -- forward the language model
-  table.insert(expanded_feats, data.labels)
+  local labels
+  if opt.direction == 'forward' then
+	labels = data.labels
+  else
+	assert(opt.direction == 'backward')
+	labels = data.labels_back
+  end
+  table.insert(expanded_feats, labels)
   local logprobs = protos.lm:forward(expanded_feats)
   -- forward the language model criterion
-  local loss = protos.crit:forward(logprobs, data.labels)
+  local loss = protos.crit:forward(logprobs, labels)
 
   -----------------------------------------------------------------------------
   -- Backward pass
   -----------------------------------------------------------------------------
   -- backprop criterion
-  local dlogprobs = protos.crit:backward(logprobs, data.labels)
+  local dlogprobs = protos.crit:backward(logprobs, labels)
   -- backprop language model
   local dgrad= protos.lm:backward(expanded_feats, dlogprobs)
   -- backprop the CNN, but only if we are finetuning
@@ -473,7 +492,7 @@ while true do
 
   -- stopping criterions
   iter = iter + 1
-  if iter % 5 == 0 then collectgarbage() end -- good idea to do this once in a while, i think
+  if iter % 4 == 0 then collectgarbage() end -- good idea to do this once in a while, i think
   if loss0 == nil then loss0 = losses.total_loss end
   if losses.total_loss > loss0 * 20 then
     print('loss seems to be exploding, quitting.')

@@ -102,7 +102,9 @@ function layer:parameters()
   local p1,g1 = self.core:parameters()
   local p2,g2 = self.lookup_table:parameters()
   local p3,g3
-  if self.finetune_att then p3,g3 = self.attmodel:parameters() end
+  if self.finetune_att then
+	p3,g3 = self.attmodel:parameters()
+  end
 
   local params = {}
   for k,v in pairs(p1) do table.insert(params, v) end
@@ -115,13 +117,7 @@ function layer:parameters()
   for k,v in pairs(g1) do table.insert(grad_params, v) end
   for k,v in pairs(g2) do table.insert(grad_params, v) end
   --print(#grad_params)
-  if self.finetune_att then
-	for k,v in pairs(g3) do
-		table.insert(grad_params, v)
-	end
-  end
-
-
+  if self.finetune_att then for k,v in pairs(g3) do table.insert(grad_params, v) end end
   -- todo: invalidate self.clones if params were requested?
   -- what if someone outside of us decided to call getParameters() or something?
   -- (that would destroy our parameter sharing because clones 2...end would point to old memory)
@@ -532,8 +528,9 @@ function layer:updateGradInput(input, gradOutput)
 	end
 
 	if self.finetune_att and t==1 then
+		--print({dimgs, dinputs[3]})
 		dimgs:add(dxt)
-		dimgs:add(dinputs[3])
+		--dimgs:add(dinputs[3])
 	end
 	-- backprop into lookup tab
  end

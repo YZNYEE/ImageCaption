@@ -228,13 +228,13 @@ function layer:updateGradInput(inputs, gradOutput)
 	gradBB = self.product:backward(self.inputB, gradBB)
 	gradBB = self.cstAtt_lc:backward({imgB, self.inputS}, gradBB)
 	local gradAA = self.cstAtt_al:backward({imgA, self.inputS}, gradA)
-	local sen = gradBB[2]
-	sen:add(gradAA[2])
+	local sen = gradBB[2]:clone()
+	sen:add(gradAA[2]:clone())
 
 	self.combineSen:backward(seq, sen)
  	self.gradInput = {}
-	table.insert(self.gradInput, gradAA[1])
-	table.insert(self.gradInput, gradBB[1])
+	table.insert(self.gradInput, gradAA[1]:clone())
+	table.insert(self.gradInput, gradBB[1]:clone())
 	table.insert(self.gradInput, sen)
 
 	return self.gradInput
@@ -253,6 +253,10 @@ function layer:clone(...)
 	clone.predict = self.predict:clone(...)
 	clone.product = self.product:clone(...)
 	clone.tanh = self.tanh:clone(...)
+
+	-- because constructAtt is special, cstatt of clones are the same.
+	clone.cstAtt_lc = self.cstAtt_lc
+    clone.cstAtt_al = self.cstAtt_al
 
     return clone
 
@@ -381,8 +385,16 @@ function crit_dis:updateOutput(inputs, seq)
 		end
 
 		--print(self.flag)
+		local flag = true
+		if t>1 then
+			if seq[t-1][i] == 0 and seq[t][i] == 0 then
+				flag = false
+			end
+		end
 
-		for j=t,tt do
+		if flag then
+
+		  for j=t,tt do
 
 			--print({i,j})
 			local target_index = seq[j][i]
@@ -418,6 +430,7 @@ function crit_dis:updateOutput(inputs, seq)
 
 			end
 
+		  end
 		end
 
 	end

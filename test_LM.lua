@@ -34,6 +34,7 @@ local function forwardApiTestFactory(dtype)
     opt.input_encoding_size = 11
 	opt.encoding_size = 11
     opt.rnn_size = 11
+	opt.g_size = 11
     opt.num_layers = 2
     opt.dropout = 0
     opt.seq_length = 7
@@ -100,6 +101,7 @@ local function gradCheckLM()
   opt.vocab_size = 5
   opt.input_encoding_size = 4
   opt.encoding_size = 4
+  opt.g_size = 4
   opt.rnn_size = 4
   opt.num_layers = 1
   opt.dropout = 0
@@ -250,6 +252,7 @@ local function overfit()
   opt.vocab_size = 5
   opt.input_encoding_size = 17
   opt.encoding_size = 17
+  opt.g_size = 17
   opt.rnn_size = 17
   opt.num_layers = 2
   opt.dropout = 0
